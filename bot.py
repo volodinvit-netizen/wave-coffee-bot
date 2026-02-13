@@ -16,7 +16,18 @@ def get_transaction(transaction_id: str):
         "token": POSTER_TOKEN,
         "transaction_id": transaction_id
     })
-    return r.json()
+    def get_transaction(transaction_id: str):
+    url = f"{BASE_URL}/dash.getTransaction"
+    r = requests.get(url, params={
+        "token": POSTER_TOKEN,
+        "transaction_id": transaction_id
+    })
+
+    try:
+        return r.json()
+    except Exception:
+        print("Poster response error:", r.text)
+        return {"error": "poster_error"}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
