@@ -7,17 +7,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 POSTER_TOKEN = os.getenv("POSTER_TOKEN")
 POSTER_DOMAIN = os.getenv("POSTER_DOMAIN")
 
-BASE_URL = f"https://{POSTER_DOMAIN}/api/v2"
+BASE_URL = f"https://{POSTER_DOMAIN}/api"
 
 
 def get_transaction(transaction_id: str):
-    url = f"{BASE_URL}/dash.getTransaction"
+    url = f"{BASE_URL}/transactions.getTransaction"
     r = requests.get(url, params={
         "token": POSTER_TOKEN,
         "transaction_id": transaction_id
     })
     def get_transaction(transaction_id: str):
-    url = f"{BASE_URL}/dash.getTransaction"
+    url = f"{BASE_URL}/transactions.getTransaction"
     r = requests.get(url, params={
         "token": POSTER_TOKEN,
         "transaction_id": transaction_id
