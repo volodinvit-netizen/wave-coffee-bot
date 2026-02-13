@@ -57,14 +57,15 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 import asyncio
 
-async def main():
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_check))
 
-    await app.run_polling()
+    print("Bot started...")
+    app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
