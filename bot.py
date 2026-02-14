@@ -12,17 +12,15 @@ BASE_URL = f"https://{POSTER_DOMAIN}/api"
 
 def get_transaction(transaction_id: str):
     url = f"{BASE_URL}/transactions.getTransaction"
-    r = requests.get(url, params={
-        "token": POSTER_TOKEN,
-        "transaction_id": transaction_id
-    })
-    def get_transaction(transaction_id: str):
-    url = f"{BASE_URL}/transactions.getTransaction"
-    r = requests.get(url, params={
-        "token": POSTER_TOKEN,
-        "transaction_id": transaction_id
-    })
+    r = requests.get(url, params={"token": POSTER_TOKEN, "transaction_id": transaction_id}, timeout=15)
 
+    # если Poster вернул не JSON, покажем текст в логах
+    try:
+        return r.json()
+    except Exception:
+        print("Poster status:", r.status_code)
+        print("Poster raw response:", r.text[:500])
+        return {"error": "poster_non_json", "status_code": r.status_code}
     try:
         return r.json()
     except Exception:
