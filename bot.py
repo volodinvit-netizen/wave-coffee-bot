@@ -11,7 +11,7 @@ BASE_URL = f"https://{POSTER_DOMAIN}/api"
 
 
 def get_transaction(transaction_id: str):
-    url = f"{BASE_URL}/transactions.getTransaction"
+    url = f"{BASE_URL}/dash.getTransaction"
     params = {"token": POSTER_TOKEN, "transaction_id": transaction_id}
     r = requests.get(url, params=params, timeout=15)
 
