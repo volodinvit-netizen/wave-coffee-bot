@@ -43,10 +43,22 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = get_transaction(receipt_id)
 
-    if "response" not in data:
-        await update.message.reply_text("Чек не найден. Проверь номер.")
-        return
+# Если Poster вернул ошибку — покажем её
+if isinstance(data, dict) and "error" in data:
+    err = data["error"]
+    await update.message.reply_text(
+        f"Poster вернул ошибку.\n"
+        f"code: {err.get('code')}\n"
+        f"message: {err.get('message')}"
+    )
+    return
 
+if "response" not in data:
+    await update.message.reply_text(
+        "Чек не найден в Poster.\n"
+        "Важно: нужен именно номер 'Чек Poster №' с чека."
+    )
+    return
     transaction = data["response"]
 
     total = float(transaction.get("total", 0))
