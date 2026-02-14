@@ -32,35 +32,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+import re
+
 async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
-    if not text.isdigit():
-        await update.message.reply_text("Введите только номер чека, например: 426374")
+    m = re.search(r"\d{4,}", text)
+    if not m:
+        await update.message.reply_text("Введите номер чека Poster, например: 426374")
         return
 
-    receipt_id = text
+    receipt_id = m.group(0)
 
     data = get_transaction(receipt_id)
 
-# Если Poster вернул ошибку — покажем её
-if isinstance(data, dict) and "error" in data:
-    err = data["error"]
-    await update.message.reply_text(
-        f"Poster вернул ошибку.\n"
-        f"code: {err.get('code')}\n"
-        f"message: {err.get('message')}"
-    )
-    return
+    if isinstance(data, dict) and "error" in data:
+        err = data["error"]
+        await update.message.reply_text(
+            f"Poster ошибка:\n"
+            f"code: {err.get('code')}\n"
+            f"message: {err.get('message')}"
+        )
+        return
 
-if "response" not in data:
-    await update.message.reply_text(
-        "Чек не найден в Poster.\n"
-        "Важно: нужен именно номер 'Чек Poster №' с чека."
-    )
-    return
+    if "response" not in data:
+        await update.message.reply_text("Чек не найден в Poster")
+        return
+
     transaction = data["response"]
-
     total = float(transaction.get("total", 0))
 
     cashback = int(total * 0.05)
@@ -68,10 +67,8 @@ if "response" not in data:
     await update.message.reply_text(
         f"✅ Чек найден!\n"
         f"Сумма: {int(total)} ₸\n"
-        f"Начислено кешбэком 5%: +{cashback} баллов\n\n"
-        f"(Скоро добавим баланс, рефералов и защиту от повторов)"
+        f"Начислено 5%: +{cashback} баллов"
     )
-
 
 import asyncio
 
