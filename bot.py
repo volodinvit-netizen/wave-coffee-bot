@@ -59,10 +59,11 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Чек не найден в Poster")
         return
 
-    transaction = data["response"][0] if isinstance(data["response"], list) and data["response"] else data["response"]
-    raw_total = float(transaction.get("total") or transaction.get("sum") or transaction.get("total_sum") or 0)
+transaction = data["response"][0] if isinstance(data["response"], list) and data["response"] else data["response"]
+
+raw_total = float(transaction.get("total") or transaction.get("sum") or transaction.get("total_sum") or 0)
 total = raw_total / 100
-    cashback = int(total * 0.05)
+cashback = int(total * 0.05)
 
     await update.message.reply_text(
         f"✅ Чек найден!\n"
