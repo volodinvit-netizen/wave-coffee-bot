@@ -133,7 +133,7 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     tg_id = update.effective_user.id
 
-> Виталий:
+
 username = update.effective_user.username
 
     # 4) Работаем с базой
