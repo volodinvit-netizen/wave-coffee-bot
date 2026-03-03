@@ -142,7 +142,7 @@ await update.message.reply_text(
     f"Ваш баланс: {balance} баллов"
 )
 import asyncio
- async def create_tables():
+async def create_tables():
     async with engine.begin() as conn:
         await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS users (
