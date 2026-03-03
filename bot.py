@@ -1,4 +1,3 @@
-> Виталий:
 import os
 import re
 import asyncio
