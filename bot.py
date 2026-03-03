@@ -1,6 +1,5 @@
 import os
 import re
-import asyncio
 import requests
 
 from telegram import Update
@@ -66,6 +65,7 @@ def get_transaction(transaction_id: str):
 
     r = requests.get(url, params=params, timeout=15)
 
+    # Логи в Render (если нужно для отладки)
     print("POSTER URL:", r.url)
     print("POSTER STATUS:", r.status_code)
     print("POSTER RAW (first 300 chars):", r.text[:300])
@@ -179,10 +179,14 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def main():
-    asyncio.run(create_tables())
+async def on_startup(app):
+    # создаём таблицы при старте бота (правильно, без asyncio.run)
+    await create_tables()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_check))
 
