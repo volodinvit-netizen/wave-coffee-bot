@@ -76,7 +76,7 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cashback = int(total * 0.05)
 
-    async with SessionLocal() as session:
+async with SessionLocal() as session:
     # Проверяем, был ли уже такой чек
     check = await session.execute(
         text("SELECT id FROM receipts WHERE transaction_id = :tid"),
@@ -135,7 +135,6 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     balance = result.scalar()
-
 await update.message.reply_text(
     f"✅ Чек найден!\n"
     f"Сумма: {int(total)} ₸\n"
