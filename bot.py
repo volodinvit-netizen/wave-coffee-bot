@@ -279,9 +279,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pending_total"] = total
 
     await update.message.reply_text(
-        f"✅ Чек найден.\n"
-        f"Теперь введите сумму с чека (числом), например: {total}"
-    )
+    "✅ Чек найден.\n"
+    "Введите сумму чека (числом)."
+)
 
 
 async def on_startup(app):
