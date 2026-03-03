@@ -10,15 +10,14 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import text
 
 
-# =========================
-# 1) НАСТРОЙКИ (Render -> Environment)
-# =========================
+# -------------------------
+# Настройки из Render -> Environment
+# -------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 POSTER_TOKEN = os.getenv("POSTER_TOKEN")
 POSTER_DOMAIN = os.getenv("POSTER_DOMAIN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Простые проверки, чтобы сразу было понятно, чего не хватает
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в Environment")
 if not POSTER_TOKEN:
@@ -31,18 +30,15 @@ if not DATABASE_URL:
 BASE_URL = f"https://{POSTER_DOMAIN}/api"
 
 
-# =========================
-# 2) ПОДКЛЮЧЕНИЕ К БАЗЕ
-# =========================
+# -------------------------
+# Подключение к базе
+# -------------------------
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def create_tables():
-    """
-    Создаёт таблицы в базе, если их ещё нет.
-    Запускается один раз при старте.
-    """
+    """Создаёт таблицы в базе, если их ещё нет."""
     async with engine.begin() as conn:
         await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS users (
@@ -63,16 +59,13 @@ async def create_tables():
         """))
 
 
-# =========================
-# 3) POSTER: ПОЛУЧИТЬ ЧЕК
-# =========================
 def get_transaction(transaction_id: str):
+    """Запрашивает чек из Poster."""
     url = f"{BASE_URL}/dash.getTransaction"
     params = {"token": POSTER_TOKEN, "transaction_id": transaction_id}
 
     r = requests.get(url, params=params, timeout=15)
 
-    # Логи в Render (если нужно для отладки)
     print("POSTER URL:", r.url)
     print("POSTER STATUS:", r.status_code)
     print("POSTER RAW (first 300 chars):", r.text[:300])
@@ -83,9 +76,6 @@ def get_transaction(transaction_id: str):
         return {"error": {"message": "Poster вернул не JSON"}, "status": r.status_code}
 
 
-# =========================
-# 4) КОМАНДЫ БОТА
-# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "☕ Добро пожаловать в Wave Coffee Rewards!\n\n"
@@ -96,7 +86,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_msg = (update.message.text or "").strip()
 
-    # 1) Достаём номер из сообщения
+    # достаём номер чека из сообщения
     m = re.search(r"\d{4,}", text_msg)
     if not m:
         await update.message.reply_text("Введите номер чека Poster, например: 426374")
@@ -104,10 +94,9 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     receipt_id = m.group(0)
 
-    # 2) Ищем чек в Poster
     data = get_transaction(receipt_id)
 
-    # Если Poster вернул ошибку в формате dict/error
+    # обработка ошибок Poster
     if isinstance(data, dict) and "error" in data and data["error"]:
         err = data["error"]
         msg = err.get("message") if isinstance(err, dict) else str(err)
@@ -121,7 +110,6 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resp = data["response"]
     transaction = resp[0] if isinstance(resp, list) and resp else resp
 
-    # 3) Сумма (Poster часто отдаёт *100)
     raw_total = transaction.get("total") or transaction.get("sum") or transaction.get("total_sum") or 0
     try:
         raw_total = float(raw_total)
@@ -129,17 +117,13 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_total = 0.0
 
     total = raw_total / 100
-    cashback = int(total * 0.05)  # 5%
+    cashback = int(total * 0.05)
 
     tg_id = update.effective_user.id
+    username = update.effective_user.username
 
-
-username = update.effective_user.username
-
-    # 4) Работаем с базой
     async with SessionLocal() as session:
-
-        # 4.1) Проверяем: не был ли уже активирован этот чек
+        # 1) проверяем, активировали ли уже этот чек
         check = await session.execute(
             text("SELECT id FROM receipts WHERE transaction_id = :tid"),
             {"tid": receipt_id}
@@ -148,7 +132,7 @@ username = update.effective_user.username
             await update.message.reply_text("⚠️ Этот чек уже активирован.")
             return
 
-        # 4.2) Создаём пользователя, если его ещё нет
+        # 2) создаём пользователя, если его нет
         await session.execute(
             text("""
             INSERT INTO users (telegram_id, username)
@@ -158,7 +142,7 @@ username = update.effective_user.username
             {"tg": tg_id, "username": username}
         )
 
-        # 4.3) Сохраняем чек
+        # 3) сохраняем чек
         await session.execute(
             text("""
             INSERT INTO receipts (transaction_id, telegram_id, amount)
@@ -167,7 +151,7 @@ username = update.effective_user.username
             {"tid": receipt_id, "tg": tg_id, "amount": int(total)}
         )
 
-        # 4.4) Начисляем баланс
+        # 4) начисляем баланс
         await session.execute(
             text("""
             UPDATE users
@@ -179,14 +163,13 @@ username = update.effective_user.username
 
         await session.commit()
 
-        # 4.5) Получаем новый баланс
+        # 5) получаем новый баланс
         result = await session.execute(
             text("SELECT balance FROM users WHERE telegram_id = :tg"),
             {"tg": tg_id}
         )
         balance = result.scalar()
 
-    # 5) Ответ пользователю
     await update.message.reply_text(
         f"✅ Чек найден!\n"
         f"Номер: {receipt_id}\n"
@@ -196,15 +179,10 @@ username = update.effective_user.username
     )
 
 
-# =========================
-# 5) ЗАПУСК
-# =========================
 def main():
-    # создаём таблицы один раз при старте
     asyncio.run(create_tables())
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_check))
 
