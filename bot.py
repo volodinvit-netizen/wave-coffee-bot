@@ -65,7 +65,6 @@ def get_transaction(transaction_id: str):
 
     r = requests.get(url, params=params, timeout=15)
 
-    # Логи в Render (если нужно для отладки)
     print("POSTER URL:", r.url)
     print("POSTER STATUS:", r.status_code)
     print("POSTER RAW (first 300 chars):", r.text[:300])
@@ -76,27 +75,174 @@ def get_transaction(transaction_id: str):
         return {"error": {"message": "Poster вернул не JSON"}, "status": r.status_code}
 
 
+def parse_receipt_number(text_msg: str) -> str | None:
+    m = re.search(r"\d{4,}", text_msg or "")
+    return m.group(0) if m else None
+
+
+def parse_amount_tenge(text_msg: str) -> int | None:
+    """
+    Понимает: 3790 / 3 790 / 3,790 / 3.790 / 3790₸
+    Возвращает целые тенге.
+    """
+    if not text_msg:
+        return None
+
+    s = text_msg.strip()
+
+    # вытащим первое число (может быть 3790, 3 790, 3,790, 3.790, 3790.50)
+    m = re.search(r"(\d[\d\s.,]*)", s)
+    if not m:
+        return None
+
+    num = m.group(1).replace(" ", "")
+
+    # Если есть и точка, и запятая — считаем, что это разделители тысяч и убираем их
+    if "." in num and "," in num:
+        num = num.replace(".", "").replace(",", "")
+        try:
+            return int(float(num))
+        except Exception:
+            return None
+
+    # Если есть запятая — может быть либо десятичная, либо разделитель тысяч
+    if "," in num and "." not in num:
+        # если после запятой 1-2 цифры — считаем это копейки
+        parts = num.split(",")
+        if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
+            num = num.replace(",", ".")
+        else:
+            num = num.replace(",", "")
+
+    # Если есть точка — может быть десятичная или разделитель тысяч
+    if "." in num:
+        parts = num.split(".")
+        if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
+            # десятичная
+            try:
+                return int(float(num))
+            except Exception:
+                return None
+        else:
+            # разделитель тысяч
+            num = num.replace(".", "")
+
+    try:
+        return int(float(num))
+    except Exception:
+        return None
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # очищаем ожидания
+    context.user_data.pop("pending_receipt_id", None)
+    context.user_data.pop("pending_total", None)
+
     await update.message.reply_text(
         "☕ Добро пожаловать в Wave Coffee Rewards!\n\n"
-        "Введите номер: Чек Poster № (например 426374), чтобы получить баллы."
+        "Шаг 1: отправьте номер чека Poster (например 426374).\n"
+        "Шаг 2: бот попросит сумму — вы её введёте, и мы начислим баллы."
     )
 
 
-async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_msg = (update.message.text or "").strip()
 
-    # достаём номер чека из сообщения
-    m = re.search(r"\d{4,}", text_msg)
-    if not m:
+    # Если мы ждём сумму — обрабатываем сумму
+    if context.user_data.get("pending_receipt_id") and context.user_data.get("pending_total") is not None:
+        amount = parse_amount_tenge(text_msg)
+
+        if amount is None:
+            await update.message.reply_text("Не понял сумму. Введите просто число, например: 3790")
+            return
+
+        expected_total = int(context.user_data["pending_total"])
+        receipt_id = str(context.user_data["pending_receipt_id"])
+
+        if amount != expected_total:
+            await update.message.reply_text(
+                f"⚠️ Сумма не совпала.\n"
+                f"Введите сумму с чека ещё раз (числом)."
+            )
+            return
+
+        # Сумма совпала — начисляем и записываем
+        cashback = int(expected_total * 0.05)
+        tg_id = update.effective_user.id
+        username = update.effective_user.username
+
+        async with SessionLocal() as session:
+            # проверяем дубль чека
+            check = await session.execute(
+                text("SELECT id FROM receipts WHERE transaction_id = :tid"),
+                {"tid": receipt_id}
+            )
+            if check.first():
+                context.user_data.pop("pending_receipt_id", None)
+                context.user_data.pop("pending_total", None)
+                await update.message.reply_text("⚠️ Этот чек уже активирован.")
+                return
+
+            # создаём пользователя если нет
+            await session.execute(
+                text("""
+                INSERT INTO users (telegram_id, username)
+                VALUES (:tg, :username)
+                ON CONFLICT (telegram_id) DO NOTHING
+                """),
+                {"tg": tg_id, "username": username}
+            )
+
+            # сохраняем чек
+            await session.execute(
+                text("""
+                INSERT INTO receipts (transaction_id, telegram_id, amount)
+                VALUES (:tid, :tg, :amount)
+                """),
+                {"tid": receipt_id, "tg": tg_id, "amount": expected_total}
+            )
+
+            # начисляем баланс
+            await session.execute(
+                text("""
+                UPDATE users
+                SET balance = balance + :cashback
+                WHERE telegram_id = :tg
+                """),
+                {"cashback": cashback, "tg": tg_id}
+            )
+
+            await session.commit()
+
+            # получаем баланс
+            result = await session.execute(
+                text("SELECT balance FROM users WHERE telegram_id = :tg"),
+                {"tg": tg_id}
+            )
+            balance = result.scalar()
+
+        # очищаем ожидание
+        context.user_data.pop("pending_receipt_id", None)
+        context.user_data.pop("pending_total", None)
+
+        await update.message.reply_text(
+            f"✅ Готово!\n"
+            f"Чек: {receipt_id}\n"
+            f"Сумма: {expected_total} ₸\n"
+            f"Начислено 5%: +{cashback} баллов\n"
+            f"Ваш баланс: {balance} баллов"
+        )
+        return
+
+    # ИНАЧЕ: мы ждём номер чека
+    receipt_id = parse_receipt_number(text_msg)
+    if not receipt_id:
         await update.message.reply_text("Введите номер чека Poster, например: 426374")
         return
 
-    receipt_id = m.group(0)
-
+    # тянем чек из Poster
     data = get_transaction(receipt_id)
 
-    # обработка ошибок Poster
     if isinstance(data, dict) and "error" in data and data["error"]:
         err = data["error"]
         msg = err.get("message") if isinstance(err, dict) else str(err)
@@ -116,14 +262,10 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         raw_total = 0.0
 
-    total = raw_total / 100
-    cashback = int(total * 0.05)
+    total = int(raw_total / 100)
 
-    tg_id = update.effective_user.id
-    username = update.effective_user.username
-
+    # Перед тем как просить сумму — сразу проверим, не активирован ли чек
     async with SessionLocal() as session:
-        # 1) проверяем, активировали ли уже этот чек
         check = await session.execute(
             text("SELECT id FROM receipts WHERE transaction_id = :tid"),
             {"tid": receipt_id}
@@ -132,55 +274,17 @@ async def handle_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Этот чек уже активирован.")
             return
 
-        # 2) создаём пользователя, если его нет
-        await session.execute(
-            text("""
-            INSERT INTO users (telegram_id, username)
-            VALUES (:tg, :username)
-            ON CONFLICT (telegram_id) DO NOTHING
-            """),
-            {"tg": tg_id, "username": username}
-        )
-
-        # 3) сохраняем чек
-        await session.execute(
-            text("""
-            INSERT INTO receipts (transaction_id, telegram_id, amount)
-            VALUES (:tid, :tg, :amount)
-            """),
-            {"tid": receipt_id, "tg": tg_id, "amount": int(total)}
-        )
-
-        # 4) начисляем баланс
-        await session.execute(
-            text("""
-            UPDATE users
-            SET balance = balance + :cashback
-            WHERE telegram_id = :tg
-            """),
-            {"cashback": cashback, "tg": tg_id}
-        )
-
-        await session.commit()
-
-        # 5) получаем новый баланс
-        result = await session.execute(
-            text("SELECT balance FROM users WHERE telegram_id = :tg"),
-            {"tg": tg_id}
-        )
-        balance = result.scalar()
+    # сохраняем ожидание суммы
+    context.user_data["pending_receipt_id"] = receipt_id
+    context.user_data["pending_total"] = total
 
     await update.message.reply_text(
-        f"✅ Чек найден!\n"
-        f"Номер: {receipt_id}\n"
-        f"Сумма: {int(total)} ₸\n"
-        f"Начислено 5%: +{cashback} баллов\n"
-        f"Ваш баланс: {balance} баллов"
+        f"✅ Чек найден.\n"
+        f"Теперь введите сумму с чека (числом), например: {total}"
     )
 
 
 async def on_startup(app):
-    # создаём таблицы при старте бота (правильно, без asyncio.run)
     await create_tables()
 
 
@@ -188,7 +292,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_check))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("Bot started...")
     app.run_polling()
