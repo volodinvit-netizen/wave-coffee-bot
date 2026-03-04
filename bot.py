@@ -33,8 +33,14 @@ BASE_URL = f"https://{POSTER_DOMAIN}/api"
 DAILY_LIMIT = 2
 RECEIPT_TTL_MINUTES = 10
 
-# Разрешаем небольшую разницу, чтобы не было “почему не совпало, хотя я ввёл правильно”
-AMOUNT_TOLERANCE_TENGE = 2  # можно поставить 1, если хочешь строже
+# допуск по сумме
+AMOUNT_TOLERANCE_TENGE = 2
+
+# Рефералы
+FRIEND_BONUS = 200
+LEVEL1_PCT = 0.03
+LEVEL2_PCT = 0.02
+LEVEL3_PCT = 0.01
 
 
 # =========================
@@ -65,7 +71,10 @@ async def create_or_update_tables():
         );
         """))
 
+        # Рефералка и служебные поля
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer BIGINT;"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS friend_bonus_given BOOLEAN DEFAULT FALSE;"))
+
         await conn.execute(text("ALTER TABLE receipts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();"))
         await conn.execute(text("ALTER TABLE receipts ADD COLUMN IF NOT EXISTS poster_time TIMESTAMPTZ;"))
 
@@ -77,6 +86,27 @@ async def ensure_user_exists(tg_id: int, username: str | None):
         VALUES (:tg, :username)
         ON CONFLICT (telegram_id) DO NOTHING
         """), {"tg": tg_id, "username": username})
+        await session.commit()
+
+
+async def set_referrer_if_empty(tg_id: int, referrer_id: int | None):
+    """
+    Ставит referrer только если его ещё нет.
+    Защита:
+    - нельзя пригласить самого себя
+    - если referrer_id пустой — ничего не делаем
+    """
+    if not referrer_id:
+        return
+    if referrer_id == tg_id:
+        return
+
+    async with SessionLocal() as session:
+        await session.execute(text("""
+            UPDATE users
+            SET referrer = COALESCE(referrer, :ref)
+            WHERE telegram_id = :tg
+        """), {"ref": referrer_id, "tg": tg_id})
         await session.commit()
 
 
@@ -101,7 +131,6 @@ def extract_total_tenge(transaction: dict) -> int:
     except Exception:
         raw = 0.0
 
-    # Если очень большое — почти наверняка *100
     if raw >= 100000:
         return int(round(raw / 100))
 
@@ -157,10 +186,6 @@ def parse_receipt(text_msg: str) -> str | None:
 
 
 def parse_amount_tenge(text_msg: str) -> int | None:
-    """
-    Понимает: 3790 / 3 790 / 3,790 / 3.790 / 3790₸
-    Возвращает целые тенге.
-    """
     if not text_msg:
         return None
 
@@ -211,10 +236,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user_exists(tg_id, username)
     context.user_data.clear()
 
+    # если человек пришёл по ссылке /start 123456
+    ref = None
+    if context.args:
+        try:
+            ref = int(context.args[0])
+        except Exception:
+            ref = None
+
+    await set_referrer_if_empty(tg_id, ref)
+
     await update.message.reply_text(
         "☕ Добро пожаловать в Wave Coffee Rewards!\n\n"
         "Шаг 1: отправьте номер чека Poster.\n"
         "Шаг 2: бот попросит сумму — вы её введёте."
+    )
+
+
+async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+
+    # бот сам подставит своё имя
+    bot_username = (await context.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start={tg_id}"
+
+    await update.message.reply_text(
+        "Вот ваша ссылка-приглашение:\n"
+        f"{link}\n\n"
+        f"Условия:\n"
+        f"— +{FRIEND_BONUS} баллов за друга (когда он впервые активирует чек)\n"
+        f"— 1 уровень: 3%, 2 уровень: 2%, 3 уровень: 1%"
     )
 
 
@@ -262,7 +313,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Что-то пошло не так. Начните заново: отправьте номер чека.")
             return
 
-        # сравнение с допуском ±2 тенге
         if abs(amount - expected) > AMOUNT_TOLERANCE_TENGE:
             await update.message.reply_text(
                 "⚠️ Сумма не совпала.\n"
@@ -308,6 +358,42 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(f"⚠️ Лимит: {DAILY_LIMIT} чека(ов) в день. Попробуйте завтра.")
                     return
 
+            # --- Рефералка: узнаём цепочку 1-2-3 уровней
+            r = await session.execute(
+                text("SELECT referrer, friend_bonus_given FROM users WHERE telegram_id=:tg"),
+                {"tg": tg_id}
+            )
+            row = r.first()
+            ref1 = row[0] if row else None
+            friend_bonus_given = bool(row[1]) if row else False
+
+            ref2 = None
+            ref3 = None
+
+            if ref1:
+                r2 = await session.execute(
+                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
+                    {"tg": ref1}
+                )
+                ref2 = r2.scalar()
+
+            if ref2:
+                r3 = await session.execute(
+                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
+                    {"tg": ref2}
+                )
+                ref3 = r3.scalar()
+
+            # --- ВАЖНО: это первая успешная активация у пользователя?
+            first_success = False
+            prev = await session.execute(
+                text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"),
+                {"tg": tg_id}
+            )
+            if (prev.scalar() or 0) == 0:
+                first_success = True
+
+            # сохранить чек
             await session.execute(text("""
             INSERT INTO receipts (transaction_id, telegram_id, amount, poster_time)
             VALUES (:tid, :tg, :amount, :poster_time)
@@ -318,14 +404,42 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "poster_time": poster_time
             })
 
+            # начислить пользователю
             await session.execute(text("""
             UPDATE users
             SET balance = balance + :b
             WHERE telegram_id=:tg
             """), {"b": cashback, "tg": tg_id})
 
+            # --- Начисления по уровням (если есть рефереры)
+            if ref1:
+                await session.execute(text("""
+                UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
+                """), {"b": int(expected * LEVEL1_PCT), "tg": ref1})
+
+            if ref2:
+                await session.execute(text("""
+                UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
+                """), {"b": int(expected * LEVEL2_PCT), "tg": ref2})
+
+            if ref3:
+                await session.execute(text("""
+                UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
+                """), {"b": int(expected * LEVEL3_PCT), "tg": ref3})
+
+            # --- +200 за друга (ТОЛЬКО за первую покупку друга, и только один раз)
+            if first_success and ref1 and (not friend_bonus_given):
+                await session.execute(text("""
+                UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
+                """), {"b": FRIEND_BONUS, "tg": ref1})
+
+                await session.execute(text("""
+                UPDATE users SET friend_bonus_given = TRUE WHERE telegram_id=:tg
+                """), {"tg": tg_id})
+
             await session.commit()
 
+            # баланс пользователя
             r = await session.execute(
                 text("SELECT balance FROM users WHERE telegram_id=:tg"),
                 {"tg": tg_id}
@@ -399,6 +513,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("invite", invite))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
