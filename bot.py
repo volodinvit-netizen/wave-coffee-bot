@@ -33,6 +33,9 @@ BASE_URL = f"https://{POSTER_DOMAIN}/api"
 DAILY_LIMIT = 2
 RECEIPT_TTL_MINUTES = 10
 
+# Разрешаем небольшую разницу, чтобы не было “почему не совпало, хотя я ввёл правильно”
+AMOUNT_TOLERANCE_TENGE = 2  # можно поставить 1, если хочешь строже
+
 
 # =========================
 # БАЗА
@@ -42,9 +45,6 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def create_or_update_tables():
-    """
-    Создаёт таблицы и добавляет недостающие колонки.
-    """
     async with engine.begin() as conn:
         await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS users (
@@ -65,7 +65,6 @@ async def create_or_update_tables():
         );
         """))
 
-        # На будущее (чтобы не падало при добавлениях)
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer BIGINT;"))
         await conn.execute(text("ALTER TABLE receipts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();"))
         await conn.execute(text("ALTER TABLE receipts ADD COLUMN IF NOT EXISTS poster_time TIMESTAMPTZ;"))
@@ -96,20 +95,13 @@ def get_transaction(transaction_id: str):
 
 
 def extract_total_tenge(transaction: dict) -> int:
-    """
-    Надёжно получаем сумму чека в тенге.
-    Poster может отдавать сумму:
-    - в total / sum / total_sum
-    - либо уже в тенге (например 3790)
-    - либо *100 (например 379000)
-    """
     raw = transaction.get("total") or transaction.get("sum") or transaction.get("total_sum") or 0
-
     try:
         raw = float(raw)
     except Exception:
         raw = 0.0
 
+    # Если очень большое — почти наверняка *100
     if raw >= 100000:
         return int(round(raw / 100))
 
@@ -117,17 +109,12 @@ def extract_total_tenge(transaction: dict) -> int:
 
 
 def extract_poster_time(transaction: dict) -> datetime | None:
-    """
-    Пытаемся достать время чека из Poster.
-    Если не нашли — вернём None (тогда 10 минут проверить нельзя).
-    """
     keys = ["date_close", "date", "created_at", "closed_at", "time"]
     for k in keys:
         v = transaction.get(k)
         if not v:
             continue
 
-        # Unix seconds
         if isinstance(v, (int, float)) and v > 1000000000:
             try:
                 return datetime.fromtimestamp(float(v), tz=timezone.utc)
@@ -231,6 +218,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("Ок. Сбросил. Введите номер чека Poster.")
+
+
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     await ensure_user_exists(tg_id, update.effective_user.username)
@@ -270,8 +262,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Что-то пошло не так. Начните заново: отправьте номер чека.")
             return
 
-        if amount != expected:
-            await update.message.reply_text("⚠️ Сумма не совпала. Введите сумму с чека ещё раз (числом).")
+        # сравнение с допуском ±2 тенге
+        if abs(amount - expected) > AMOUNT_TOLERANCE_TENGE:
+            await update.message.reply_text(
+                "⚠️ Сумма не совпала.\n"
+                "Введите сумму с чека ещё раз (числом).\n"
+                "Если запутались — напишите /cancel"
+            )
             return
 
         poster_time = context.user_data.get("poster_time")  # datetime | None
@@ -280,7 +277,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tg_id != ADMIN_TG_ID and is_receipt_too_old(poster_time):
             context.user_data.clear()
             await update.message.reply_text(
-                f"⚠️ Чек уже неактуален. Можно активировать только в течение {RECEIPT_TTL_MINUTES} минут."
+                f"⚠️ Чек уже неактуален. Можно активировать только в течение {RECEIPT_TTL_MINUTES} минут.\n"
+                "Начните заново: отправьте номер чека."
             )
             return
 
@@ -310,7 +308,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(f"⚠️ Лимит: {DAILY_LIMIT} чека(ов) в день. Попробуйте завтра.")
                     return
 
-            # сохранить чек
             await session.execute(text("""
             INSERT INTO receipts (transaction_id, telegram_id, amount, poster_time)
             VALUES (:tid, :tg, :amount, :poster_time)
@@ -321,7 +318,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "poster_time": poster_time
             })
 
-            # начислить баланс
             await session.execute(text("""
             UPDATE users
             SET balance = balance + :b
@@ -365,10 +361,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = extract_total_tenge(transaction)
     poster_time = extract_poster_time(transaction)
 
-    # лог для контроля
     print("EXPECTED TOTAL:", total, "POSTER_TIME:", poster_time, "RECEIPT:", receipt)
 
-    # до запроса суммы — проверим дубль и лимит (лимит админ обходит)
     async with SessionLocal() as session:
         check = await session.execute(
             text("SELECT id FROM receipts WHERE transaction_id=:tid"),
@@ -405,6 +399,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
