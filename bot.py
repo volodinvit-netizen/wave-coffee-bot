@@ -82,18 +82,18 @@ async def create_or_update_tables():
 
         await conn.execute(text("ALTER TABLE receipts ADD COLUMN IF NOT EXISTS poster_time TIMESTAMPTZ;"))
 
-        # Рефералка: кто пригласил + был ли уже выдан бонус +200
+        # Рефералка
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer BIGINT;"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS friend_bonus_given BOOLEAN DEFAULT FALSE;"))
 
-        # Таблица списаний (оплата баллами)
+        # Списание
         await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS redemptions (
             id BIGSERIAL PRIMARY KEY,
             code TEXT UNIQUE,
             telegram_id BIGINT,
             amount BIGINT,
-            status TEXT DEFAULT 'pending',  -- pending / used / cancelled / expired
+            status TEXT DEFAULT 'pending',
             created_at TIMESTAMPTZ DEFAULT NOW(),
             used_at TIMESTAMPTZ
         );
@@ -111,7 +111,6 @@ async def ensure_user_exists(tg_id: int, username: str | None):
 
 
 async def set_referrer_if_empty(tg_id: int, referrer_id: int | None):
-    # нельзя самого себя, и пустое — не ставим
     if not referrer_id or referrer_id == tg_id:
         return
 
@@ -145,7 +144,6 @@ def extract_total_tenge(transaction: dict) -> int:
     except Exception:
         raw = 0.0
 
-    # Если очень большое — почти наверняка *100
     if raw >= 100000:
         return int(round(raw / 100))
 
@@ -193,7 +191,7 @@ def is_receipt_too_old(poster_time: datetime | None) -> bool:
 
 
 # =========================
-# ПАРСИНГ ЧИСЕЛ
+# ПАРСИНГ
 # =========================
 def parse_receipt(text_msg: str) -> str | None:
     m = re.search(r"\d{4,}", text_msg or "")
@@ -242,7 +240,7 @@ def parse_amount_tenge(text_msg: str) -> int | None:
 
 
 def generate_code() -> str:
-    return str(secrets.randbelow(900000) + 100000)  # 6 цифр
+    return str(secrets.randbelow(900000) + 100000)
 
 
 # =========================
@@ -279,7 +277,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username
     await ensure_user_exists(tg_id, username)
 
-    # если человек пришёл по ссылке вида ...?start=123456
     ref = None
     if context.args:
         try:
@@ -290,12 +287,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await set_referrer_if_empty(tg_id, ref)
 
     context.user_data.clear()
-
-    await show_menu(
-        update, context,
-        "☕ Wave Coffee Rewards\n\n"
-        "Нажмите кнопку ниже."
-    )
+    await show_menu(update, context, "☕ Wave Coffee Rewards\n\nНажмите кнопку ниже.")
 
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,10 +339,7 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "menu:earn":
         context.user_data.clear()
         context.user_data["mode"] = "earn_wait_receipt"
-        await query.message.reply_text(
-            "Введите номер чека Poster (только цифры).",
-            reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID)
-        )
+        await query.message.reply_text("Введите номер чека Poster (только цифры).", reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID))
         return
 
     if action == "menu:spend":
@@ -369,17 +358,14 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data.clear()
         context.user_data["mode"] = "confirm_wait_code"
-        await query.message.reply_text(
-            "Введите код (6 цифр), который показал клиент.",
-            reply_markup=main_menu_keyboard(True)
-        )
+        await query.message.reply_text("Введите код (6 цифр), который показал клиент.", reply_markup=main_menu_keyboard(True))
         return
 
     await query.message.reply_text("Не понял действие. Нажмите /start.")
 
 
 # =========================
-# ТЕКСТ (по текущему режиму)
+# ТЕКСТ (по режиму)
 # =========================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
@@ -407,12 +393,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = extract_total_tenge(transaction)
         poster_time = extract_poster_time(transaction)
 
-        # дубль + лимит — до ввода суммы
         async with SessionLocal() as session:
-            check = await session.execute(
-                text("SELECT id FROM receipts WHERE transaction_id=:tid"),
-                {"tid": receipt}
-            )
+            check = await session.execute(text("SELECT id FROM receipts WHERE transaction_id=:tid"), {"tid": receipt})
             if check.first():
                 await update.message.reply_text("⚠️ Этот чек уже активирован.")
                 return
@@ -442,19 +424,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не понял сумму. Введите просто число, например: 3790")
             return
 
-        expected = int(context.user_data.get("poster_sum", 0))
         receipt_id = str(context.user_data.get("receipt", ""))
-
-        if not receipt_id or expected <= 0:
+        if not receipt_id:
             context.user_data.clear()
-            await update.message.reply_text("Что-то пошло не так. Нажмите /start и попробуйте заново.")
+            await update.message.reply_text("Сбилось состояние. Нажмите /start и попробуйте заново.")
             return
+
+        # ✅ ВОТ ГЛАВНАЯ ПРАВКА:
+        # каждый раз, когда человек вводит сумму — заново тянем чек из Poster,
+        # чтобы expected был актуальный
+        data = get_transaction(receipt_id)
+        if not isinstance(data, dict) or "response" not in data:
+            await update.message.reply_text("Не смог обновить чек в Poster. Попробуйте ещё раз.")
+            return
+
+        resp = data["response"]
+        transaction = resp[0] if isinstance(resp, list) and resp else resp
+        expected = extract_total_tenge(transaction)
+        poster_time = extract_poster_time(transaction)
+
+        # обновим в памяти (на всякий)
+        context.user_data["poster_sum"] = expected
+        context.user_data["poster_time"] = poster_time
 
         if abs(amount - expected) > AMOUNT_TOLERANCE_TENGE:
-            await update.message.reply_text("⚠️ Сумма не совпала. Введите сумму с чека ещё раз (числом).")
+            await update.message.reply_text(
+                "⚠️ Сумма не совпала.\n"
+                "Введите сумму с чека ещё раз (числом).\n"
+                "Если чек только что пробили — подождите 2–3 секунды и введите снова.\n"
+                "Или нажмите ❌ Отмена и начните заново."
+            )
             return
-
-        poster_time = context.user_data.get("poster_time")
 
         # 10 минут — админ обходит
         if tg_id != ADMIN_TG_ID and is_receipt_too_old(poster_time):
@@ -468,11 +468,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cashback = int(expected * 0.05)
 
         async with SessionLocal() as session:
-            # дубль (ещё раз — защита)
-            check = await session.execute(
-                text("SELECT id FROM receipts WHERE transaction_id=:tid"),
-                {"tid": receipt_id}
-            )
+            # дубль
+            check = await session.execute(text("SELECT id FROM receipts WHERE transaction_id=:tid"), {"tid": receipt_id})
             if check.first():
                 context.user_data.clear()
                 await update.message.reply_text("⚠️ Этот чек уже активирован.")
@@ -490,14 +487,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(f"⚠️ Лимит: {DAILY_LIMIT} чека(ов) в день. Попробуйте завтра.")
                     return
 
-            # это первая успешная активация у пользователя?
-            prev = await session.execute(
-                text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"),
-                {"tg": tg_id}
-            )
+            # первая успешная активация?
+            prev = await session.execute(text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"), {"tg": tg_id})
             first_success = ((prev.scalar() or 0) == 0)
 
-            # узнаём цепочку рефереров 1-2-3 уровней
+            # цепочка рефереров
             r = await session.execute(
                 text("SELECT referrer, friend_bonus_given FROM users WHERE telegram_id=:tg"),
                 {"tg": tg_id}
@@ -510,17 +504,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ref3 = None
 
             if ref1:
-                r2 = await session.execute(
-                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
-                    {"tg": ref1}
-                )
+                r2 = await session.execute(text("SELECT referrer FROM users WHERE telegram_id=:tg"), {"tg": ref1})
                 ref2 = r2.scalar()
 
             if ref2:
-                r3 = await session.execute(
-                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
-                    {"tg": ref2}
-                )
+                r3 = await session.execute(text("SELECT referrer FROM users WHERE telegram_id=:tg"), {"tg": ref2})
                 ref3 = r3.scalar()
 
             # сохраняем чек
@@ -529,44 +517,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 VALUES (:tid, :tg, :amount, :poster_time)
             """), {"tid": receipt_id, "tg": tg_id, "amount": expected, "poster_time": poster_time})
 
-            # начисляем пользователю 5%
-            await session.execute(text("""
-                UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
-            """), {"b": cashback, "tg": tg_id})
+            # 5% пользователю
+            await session.execute(text("UPDATE users SET balance = balance + :b WHERE telegram_id=:tg"),
+                                  {"b": cashback, "tg": tg_id})
 
-            # начисления по уровням с каждой покупки
+            # проценты по уровням
             if ref1:
-                await session.execute(text("""
-                    UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
-                """), {"b": int(expected * LEVEL1_PCT), "tg": ref1})
-
+                await session.execute(text("UPDATE users SET balance = balance + :b WHERE telegram_id=:tg"),
+                                      {"b": int(expected * LEVEL1_PCT), "tg": ref1})
             if ref2:
-                await session.execute(text("""
-                    UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
-                """), {"b": int(expected * LEVEL2_PCT), "tg": ref2})
-
+                await session.execute(text("UPDATE users SET balance = balance + :b WHERE telegram_id=:tg"),
+                                      {"b": int(expected * LEVEL2_PCT), "tg": ref2})
             if ref3:
-                await session.execute(text("""
-                    UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
-                """), {"b": int(expected * LEVEL3_PCT), "tg": ref3})
+                await session.execute(text("UPDATE users SET balance = balance + :b WHERE telegram_id=:tg"),
+                                      {"b": int(expected * LEVEL3_PCT), "tg": ref3})
 
-            # +200 за друга — только один раз, когда друг впервые активировал чек
+            # +200 за друга 1 раз
             if first_success and ref1 and (not friend_bonus_given):
-                await session.execute(text("""
-                    UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
-                """), {"b": FRIEND_BONUS, "tg": ref1})
-
-                await session.execute(text("""
-                    UPDATE users SET friend_bonus_given = TRUE WHERE telegram_id=:tg
-                """), {"tg": tg_id})
+                await session.execute(text("UPDATE users SET balance = balance + :b WHERE telegram_id=:tg"),
+                                      {"b": FRIEND_BONUS, "tg": ref1})
+                await session.execute(text("UPDATE users SET friend_bonus_given = TRUE WHERE telegram_id=:tg"),
+                                      {"tg": tg_id})
 
             await session.commit()
 
-            # баланс пользователя
-            rbal = await session.execute(
-                text("SELECT balance FROM users WHERE telegram_id=:tg"),
-                {"tg": tg_id}
-            )
+            rbal = await session.execute(text("SELECT balance FROM users WHERE telegram_id=:tg"), {"tg": tg_id})
             new_balance = rbal.scalar() or 0
 
         context.user_data.clear()
@@ -588,25 +563,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         async with SessionLocal() as session:
-            r = await session.execute(
-                text("SELECT balance FROM users WHERE telegram_id=:tg"),
-                {"tg": tg_id}
-            )
+            r = await session.execute(text("SELECT balance FROM users WHERE telegram_id=:tg"), {"tg": tg_id})
             bal = r.scalar() or 0
 
             if bal < amount:
                 context.user_data.clear()
                 await update.message.reply_text(
-                    f"Недостаточно баллов.\n"
-                    f"Нужно: {amount}\n"
-                    f"У вас: {bal}\n\n"
+                    f"Недостаточно баллов.\nНужно: {amount}\nУ вас: {bal}\n\n"
                     f"Оплата баллами возможна только при 100% покрытии суммы."
                 )
                 await show_menu(update, context, "Выберите действие:")
                 return
 
             code = generate_code()
-
             for _ in range(2):
                 try:
                     await session.execute(text("""
@@ -672,24 +641,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Код просрочен.")
                 return
 
-            r2 = await session.execute(
-                text("SELECT balance FROM users WHERE telegram_id=:tg"),
-                {"tg": user_id}
-            )
+            r2 = await session.execute(text("SELECT balance FROM users WHERE telegram_id=:tg"), {"tg": user_id})
             bal = r2.scalar() or 0
 
             if bal < amount:
                 await update.message.reply_text("У клиента недостаточно баллов (баланс изменился).")
                 return
 
-            await session.execute(text("""
-                UPDATE users SET balance = balance - :amt WHERE telegram_id = :tg
-            """), {"amt": amount, "tg": user_id})
-
-            await session.execute(text("""
-                UPDATE redemptions SET status='used', used_at=NOW() WHERE id=:id
-            """), {"id": rid})
-
+            await session.execute(text("UPDATE users SET balance = balance - :amt WHERE telegram_id = :tg"),
+                                  {"amt": amount, "tg": user_id})
+            await session.execute(text("UPDATE redemptions SET status='used', used_at=NOW() WHERE id=:id"),
+                                  {"id": rid})
             await session.commit()
 
         context.user_data.clear()
@@ -697,7 +659,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(update, context, "Выберите действие:")
         return
 
-    # Если человек просто пишет текст без режима
     await show_menu(update, context, "Я не понял. Нажмите кнопку ниже:")
 
 
