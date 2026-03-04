@@ -42,7 +42,14 @@ DAILY_LIMIT = 2
 RECEIPT_TTL_MINUTES = 10
 AMOUNT_TOLERANCE_TENGE = 2
 
-REDEEM_TTL_MINUTES = 10  # код на списание
+# списание
+REDEEM_TTL_MINUTES = 10  # код действует 10 минут
+
+# рефералка
+FRIEND_BONUS = 200
+LEVEL1_PCT = 0.03
+LEVEL2_PCT = 0.02
+LEVEL3_PCT = 0.01
 
 
 # =========================
@@ -75,6 +82,11 @@ async def create_or_update_tables():
 
         await conn.execute(text("ALTER TABLE receipts ADD COLUMN IF NOT EXISTS poster_time TIMESTAMPTZ;"))
 
+        # Рефералка: кто пригласил + был ли уже выдан бонус +200
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer BIGINT;"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS friend_bonus_given BOOLEAN DEFAULT FALSE;"))
+
+        # Таблица списаний (оплата баллами)
         await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS redemptions (
             id BIGSERIAL PRIMARY KEY,
@@ -95,6 +107,20 @@ async def ensure_user_exists(tg_id: int, username: str | None):
         VALUES (:tg, :username)
         ON CONFLICT (telegram_id) DO NOTHING
         """), {"tg": tg_id, "username": username})
+        await session.commit()
+
+
+async def set_referrer_if_empty(tg_id: int, referrer_id: int | None):
+    # нельзя самого себя, и пустое — не ставим
+    if not referrer_id or referrer_id == tg_id:
+        return
+
+    async with SessionLocal() as session:
+        await session.execute(text("""
+            UPDATE users
+            SET referrer = COALESCE(referrer, :ref)
+            WHERE telegram_id = :tg
+        """), {"ref": referrer_id, "tg": tg_id})
         await session.commit()
 
 
@@ -227,6 +253,7 @@ def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💳 Баланс", callback_data="menu:balance")],
         [InlineKeyboardButton("🧾 Начислить по чеку", callback_data="menu:earn")],
         [InlineKeyboardButton("💸 Оплатить баллами (100%)", callback_data="menu:spend")],
+        [InlineKeyboardButton("🤝 Пригласить друга", callback_data="menu:invite")],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("✅ Подтвердить код", callback_data="menu:confirm")])
@@ -236,23 +263,31 @@ def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text_msg: str = "Выберите действие:"):
     user = update.effective_user
-    is_admin = (user.id == ADMIN_TG_ID)
-    kb = main_menu_keyboard(is_admin)
+    kb = main_menu_keyboard(user.id == ADMIN_TG_ID)
 
     if update.message:
         await update.message.reply_text(text_msg, reply_markup=kb)
     else:
-        # callback query
         await update.callback_query.message.reply_text(text_msg, reply_markup=kb)
 
 
 # =========================
-# КОМАНДЫ
+# /start
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     username = update.effective_user.username
     await ensure_user_exists(tg_id, username)
+
+    # если человек пришёл по ссылке вида ...?start=123456
+    ref = None
+    if context.args:
+        try:
+            ref = int(context.args[0])
+        except Exception:
+            ref = None
+
+    await set_referrer_if_empty(tg_id, ref)
 
     context.user_data.clear()
 
@@ -269,7 +304,7 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# ОБРАБОТКА НАЖАТИЙ КНОПОК
+# НАЖАТИЯ КНОПОК
 # =========================
 async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -281,7 +316,6 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     action = (query.data or "")
 
-    # Всегда можно сбросить состояние
     if action == "menu:cancel":
         context.user_data.clear()
         await query.message.reply_text("Ок. Сбросил.", reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID))
@@ -295,6 +329,19 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             bal = r.scalar() or 0
         await query.message.reply_text(f"Ваш баланс: {bal} баллов", reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID))
+        return
+
+    if action == "menu:invite":
+        bot_username = (await context.bot.get_me()).username
+        link = f"https://t.me/{bot_username}?start={tg_id}"
+        await query.message.reply_text(
+            "Ваша ссылка-приглашение:\n"
+            f"{link}\n\n"
+            f"Условия:\n"
+            f"— +{FRIEND_BONUS} баллов за друга (когда он впервые активирует чек)\n"
+            f"— 1 уровень: 3%, 2 уровень: 2%, 3 уровень: 1%",
+            reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID)
+        )
         return
 
     if action == "menu:earn":
@@ -332,7 +379,7 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# ОБРАБОТКА ТЕКСТА (по текущему режиму)
+# ТЕКСТ (по текущему режиму)
 # =========================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
@@ -360,7 +407,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = extract_total_tenge(transaction)
         poster_time = extract_poster_time(transaction)
 
-        # проверки дубля и лимита — до ввода суммы
+        # дубль + лимит — до ввода суммы
         async with SessionLocal() as session:
             check = await session.execute(
                 text("SELECT id FROM receipts WHERE transaction_id=:tid"),
@@ -421,7 +468,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cashback = int(expected * 0.05)
 
         async with SessionLocal() as session:
-            # дубль
+            # дубль (ещё раз — защита)
             check = await session.execute(
                 text("SELECT id FROM receipts WHERE transaction_id=:tid"),
                 {"tid": receipt_id}
@@ -443,24 +490,84 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(f"⚠️ Лимит: {DAILY_LIMIT} чека(ов) в день. Попробуйте завтра.")
                     return
 
-            # сохранить чек
+            # это первая успешная активация у пользователя?
+            prev = await session.execute(
+                text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"),
+                {"tg": tg_id}
+            )
+            first_success = ((prev.scalar() or 0) == 0)
+
+            # узнаём цепочку рефереров 1-2-3 уровней
+            r = await session.execute(
+                text("SELECT referrer, friend_bonus_given FROM users WHERE telegram_id=:tg"),
+                {"tg": tg_id}
+            )
+            row = r.first()
+            ref1 = row[0] if row else None
+            friend_bonus_given = bool(row[1]) if row else False
+
+            ref2 = None
+            ref3 = None
+
+            if ref1:
+                r2 = await session.execute(
+                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
+                    {"tg": ref1}
+                )
+                ref2 = r2.scalar()
+
+            if ref2:
+                r3 = await session.execute(
+                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
+                    {"tg": ref2}
+                )
+                ref3 = r3.scalar()
+
+            # сохраняем чек
             await session.execute(text("""
                 INSERT INTO receipts (transaction_id, telegram_id, amount, poster_time)
                 VALUES (:tid, :tg, :amount, :poster_time)
             """), {"tid": receipt_id, "tg": tg_id, "amount": expected, "poster_time": poster_time})
 
-            # начислить баланс
+            # начисляем пользователю 5%
             await session.execute(text("""
                 UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
             """), {"b": cashback, "tg": tg_id})
 
+            # начисления по уровням с каждой покупки
+            if ref1:
+                await session.execute(text("""
+                    UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
+                """), {"b": int(expected * LEVEL1_PCT), "tg": ref1})
+
+            if ref2:
+                await session.execute(text("""
+                    UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
+                """), {"b": int(expected * LEVEL2_PCT), "tg": ref2})
+
+            if ref3:
+                await session.execute(text("""
+                    UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
+                """), {"b": int(expected * LEVEL3_PCT), "tg": ref3})
+
+            # +200 за друга — только один раз, когда друг впервые активировал чек
+            if first_success and ref1 and (not friend_bonus_given):
+                await session.execute(text("""
+                    UPDATE users SET balance = balance + :b WHERE telegram_id=:tg
+                """), {"b": FRIEND_BONUS, "tg": ref1})
+
+                await session.execute(text("""
+                    UPDATE users SET friend_bonus_given = TRUE WHERE telegram_id=:tg
+                """), {"tg": tg_id})
+
             await session.commit()
 
-            r = await session.execute(
+            # баланс пользователя
+            rbal = await session.execute(
                 text("SELECT balance FROM users WHERE telegram_id=:tg"),
                 {"tg": tg_id}
             )
-            new_balance = r.scalar() or 0
+            new_balance = rbal.scalar() or 0
 
         context.user_data.clear()
         await update.message.reply_text(
@@ -500,7 +607,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             code = generate_code()
 
-            # 2 попытки на случай совпадения кода
             for _ in range(2):
                 try:
                     await session.execute(text("""
@@ -527,7 +633,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(update, context, "Выберите действие:")
         return
 
-    # --- 4) Подтверждение: ждём код
+    # --- 4) Подтверждение: ждём код (админ)
     if mode == "confirm_wait_code":
         if tg_id != ADMIN_TG_ID:
             context.user_data.clear()
