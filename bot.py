@@ -34,7 +34,8 @@ async def create_tables():
             referrer BIGINT
         );
         """))
-
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT;"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer BIGINT;"))
         await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS receipts (
             id BIGSERIAL PRIMARY KEY,
