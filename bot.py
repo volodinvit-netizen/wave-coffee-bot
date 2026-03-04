@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+from datetime import datetime, timedelta
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -9,42 +10,28 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import text
 
 
-# -------------------------
-# Настройки из Render -> Environment
-# -------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 POSTER_TOKEN = os.getenv("POSTER_TOKEN")
 POSTER_DOMAIN = os.getenv("POSTER_DOMAIN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not BOT_TOKEN:
-    raise RuntimeError("Не задан BOT_TOKEN в Environment")
-if not POSTER_TOKEN:
-    raise RuntimeError("Не задан POSTER_TOKEN в Environment")
-if not POSTER_DOMAIN:
-    raise RuntimeError("Не задан POSTER_DOMAIN в Environment")
-if not DATABASE_URL:
-    raise RuntimeError("Не задан DATABASE_URL в Environment")
-
 BASE_URL = f"https://{POSTER_DOMAIN}/api"
 
 
-# -------------------------
-# Подключение к базе
-# -------------------------
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def create_tables():
-    """Создаёт таблицы в базе, если их ещё нет."""
     async with engine.begin() as conn:
+
         await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS users (
             id BIGSERIAL PRIMARY KEY,
             telegram_id BIGINT UNIQUE,
             username TEXT,
-            balance BIGINT DEFAULT 0
+            balance BIGINT DEFAULT 0,
+            referrer BIGINT
         );
         """))
 
@@ -53,235 +40,192 @@ async def create_tables():
             id BIGSERIAL PRIMARY KEY,
             transaction_id TEXT UNIQUE,
             telegram_id BIGINT,
-            amount BIGINT
+            amount BIGINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """))
 
 
 def get_transaction(transaction_id: str):
-    """Запрашивает чек из Poster."""
     url = f"{BASE_URL}/dash.getTransaction"
     params = {"token": POSTER_TOKEN, "transaction_id": transaction_id}
 
     r = requests.get(url, params=params, timeout=15)
 
-    print("POSTER URL:", r.url)
-    print("POSTER STATUS:", r.status_code)
-    print("POSTER RAW (first 300 chars):", r.text[:300])
-
     try:
         return r.json()
     except Exception:
-        return {"error": {"message": "Poster вернул не JSON"}, "status": r.status_code}
+        return {"error": "poster_non_json"}
 
 
-def parse_receipt_number(text_msg: str) -> str | None:
-    m = re.search(r"\d{4,}", text_msg or "")
+def parse_receipt_number(text_msg: str):
+    m = re.search(r"\d{4,}", text_msg)
     return m.group(0) if m else None
 
 
-def parse_amount_tenge(text_msg: str) -> int | None:
-    """
-    Понимает: 3790 / 3 790 / 3,790 / 3.790 / 3790₸
-    Возвращает целые тенге.
-    """
-    if not text_msg:
-        return None
-
-    s = text_msg.strip()
-
-    # вытащим первое число (может быть 3790, 3 790, 3,790, 3.790, 3790.50)
-    m = re.search(r"(\d[\d\s.,]*)", s)
-    if not m:
-        return None
-
-    num = m.group(1).replace(" ", "")
-
-    # Если есть и точка, и запятая — считаем, что это разделители тысяч и убираем их
-    if "." in num and "," in num:
-        num = num.replace(".", "").replace(",", "")
-        try:
-            return int(float(num))
-        except Exception:
-            return None
-
-    # Если есть запятая — может быть либо десятичная, либо разделитель тысяч
-    if "," in num and "." not in num:
-        # если после запятой 1-2 цифры — считаем это копейки
-        parts = num.split(",")
-        if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
-            num = num.replace(",", ".")
-        else:
-            num = num.replace(",", "")
-
-    # Если есть точка — может быть десятичная или разделитель тысяч
-    if "." in num:
-        parts = num.split(".")
-        if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
-            # десятичная
-            try:
-                return int(float(num))
-            except Exception:
-                return None
-        else:
-            # разделитель тысяч
-            num = num.replace(".", "")
-
-    try:
-        return int(float(num))
-    except Exception:
-        return None
+def parse_amount(text_msg: str):
+    m = re.search(r"\d+", text_msg)
+    return int(m.group(0)) if m else None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # очищаем ожидания
-    context.user_data.pop("pending_receipt_id", None)
-    context.user_data.pop("pending_total", None)
+
+    tg_id = update.effective_user.id
+    username = update.effective_user.username
+
+    ref = None
+    if context.args:
+        ref = context.args[0]
+
+    async with SessionLocal() as session:
+
+        await session.execute(text("""
+        INSERT INTO users (telegram_id, username, referrer)
+        VALUES (:tg, :username, :ref)
+        ON CONFLICT (telegram_id) DO NOTHING
+        """), {"tg": tg_id, "username": username, "ref": ref})
+
+        await session.commit()
 
     await update.message.reply_text(
         "☕ Добро пожаловать в Wave Coffee Rewards!\n\n"
-        "Шаг 1: отправьте номер чека Poster (например 426374).\n"
-        "Шаг 2: бот попросит сумму — вы её введёте, и мы начислим баллы."
+        "Введите номер чека Poster."
     )
 
 
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    tg_id = update.effective_user.id
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            text("SELECT balance FROM users WHERE telegram_id = :tg"),
+            {"tg": tg_id}
+        )
+
+        bal = result.scalar() or 0
+
+    await update.message.reply_text(f"Ваш баланс: {bal} баллов")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text_msg = (update.message.text or "").strip()
 
-    # Если мы ждём сумму — обрабатываем сумму
-    if context.user_data.get("pending_receipt_id") and context.user_data.get("pending_total") is not None:
-        amount = parse_amount_tenge(text_msg)
+    text_msg = update.message.text.strip()
 
-        if amount is None:
-            await update.message.reply_text("Не понял сумму. Введите просто число, например: 3790")
+    if context.user_data.get("wait_sum"):
+
+        amount = parse_amount(text_msg)
+
+        if not amount:
+            await update.message.reply_text("Введите сумму чека числом.")
             return
 
-        expected_total = int(context.user_data["pending_total"])
-        receipt_id = str(context.user_data["pending_receipt_id"])
+        receipt_id = context.user_data["receipt_id"]
+        poster_sum = context.user_data["poster_sum"]
 
-        if amount != expected_total:
-            await update.message.reply_text(
-                f"⚠️ Сумма не совпала.\n"
-                f"Введите сумму с чека ещё раз (числом)."
-            )
+        if amount != poster_sum:
+            await update.message.reply_text("Сумма не совпала. Попробуйте снова.")
             return
 
-        # Сумма совпала — начисляем и записываем
-        cashback = int(expected_total * 0.05)
+        cashback = int(amount * 0.05)
         tg_id = update.effective_user.id
-        username = update.effective_user.username
 
         async with SessionLocal() as session:
-            # проверяем дубль чека
+
             check = await session.execute(
-                text("SELECT id FROM receipts WHERE transaction_id = :tid"),
+                text("SELECT id FROM receipts WHERE transaction_id=:tid"),
                 {"tid": receipt_id}
             )
+
             if check.first():
-                context.user_data.pop("pending_receipt_id", None)
-                context.user_data.pop("pending_total", None)
-                await update.message.reply_text("⚠️ Этот чек уже активирован.")
+                await update.message.reply_text("Чек уже активирован.")
                 return
 
-            # создаём пользователя если нет
-            await session.execute(
-                text("""
-                INSERT INTO users (telegram_id, username)
-                VALUES (:tg, :username)
-                ON CONFLICT (telegram_id) DO NOTHING
-                """),
-                {"tg": tg_id, "username": username}
+            today_check = await session.execute(text("""
+            SELECT COUNT(*) FROM receipts
+            WHERE telegram_id=:tg
+            AND created_at >= CURRENT_DATE
+            """), {"tg": tg_id})
+
+            if today_check.scalar() >= 2:
+                await update.message.reply_text("Лимит 2 чека в день.")
+                return
+
+            await session.execute(text("""
+            INSERT INTO receipts (transaction_id, telegram_id, amount)
+            VALUES (:tid,:tg,:amount)
+            """), {"tid": receipt_id, "tg": tg_id, "amount": amount})
+
+            await session.execute(text("""
+            UPDATE users SET balance = balance + :cashback
+            WHERE telegram_id = :tg
+            """), {"cashback": cashback, "tg": tg_id})
+
+            ref = await session.execute(
+                text("SELECT referrer FROM users WHERE telegram_id=:tg"),
+                {"tg": tg_id}
             )
 
-            # сохраняем чек
-            await session.execute(
-                text("""
-                INSERT INTO receipts (transaction_id, telegram_id, amount)
-                VALUES (:tid, :tg, :amount)
-                """),
-                {"tid": receipt_id, "tg": tg_id, "amount": expected_total}
-            )
+            ref1 = ref.scalar()
 
-            # начисляем баланс
-            await session.execute(
-                text("""
-                UPDATE users
-                SET balance = balance + :cashback
+            if ref1:
+
+                r1 = int(amount * 0.03)
+                await session.execute(text("""
+                UPDATE users SET balance = balance + :b
                 WHERE telegram_id = :tg
-                """),
-                {"cashback": cashback, "tg": tg_id}
-            )
+                """), {"b": r1, "tg": ref1})
+
+                r2 = await session.execute(
+                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
+                    {"tg": ref1}
+                )
+
+                ref2 = r2.scalar()
+
+                if ref2:
+
+                    b2 = int(amount * 0.02)
+
+                    await session.execute(text("""
+                    UPDATE users SET balance = balance + :b
+                    WHERE telegram_id = :tg
+                    """), {"b": b2, "tg": ref2})
 
             await session.commit()
 
-            # получаем баланс
-            result = await session.execute(
-                text("SELECT balance FROM users WHERE telegram_id = :tg"),
-                {"tg": tg_id}
-            )
-            balance = result.scalar()
-
-        # очищаем ожидание
-        context.user_data.pop("pending_receipt_id", None)
-        context.user_data.pop("pending_total", None)
+        context.user_data.clear()
 
         await update.message.reply_text(
-            f"✅ Готово!\n"
-            f"Чек: {receipt_id}\n"
-            f"Сумма: {expected_total} ₸\n"
-            f"Начислено 5%: +{cashback} баллов\n"
-            f"Ваш баланс: {balance} баллов"
+            f"Чек принят.\n"
+            f"Начислено {cashback} баллов."
         )
+
         return
 
-    # ИНАЧЕ: мы ждём номер чека
     receipt_id = parse_receipt_number(text_msg)
+
     if not receipt_id:
-        await update.message.reply_text("Введите номер чека Poster, например: 426374")
+        await update.message.reply_text("Введите номер чека.")
         return
 
-    # тянем чек из Poster
     data = get_transaction(receipt_id)
 
-    if isinstance(data, dict) and "error" in data and data["error"]:
-        err = data["error"]
-        msg = err.get("message") if isinstance(err, dict) else str(err)
-        await update.message.reply_text(f"Poster ошибка: {msg}")
+    if "response" not in data:
+        await update.message.reply_text("Чек не найден.")
         return
 
-    if not isinstance(data, dict) or "response" not in data:
-        await update.message.reply_text("Чек не найден в Poster")
-        return
+    transaction = data["response"][0] if isinstance(data["response"], list) else data["response"]
 
-    resp = data["response"]
-    transaction = resp[0] if isinstance(resp, list) and resp else resp
-
-    raw_total = transaction.get("total") or transaction.get("sum") or transaction.get("total_sum") or 0
-    try:
-        raw_total = float(raw_total)
-    except Exception:
-        raw_total = 0.0
-
+    raw_total = float(transaction.get("total") or 0)
     total = int(raw_total / 100)
 
-    # Перед тем как просить сумму — сразу проверим, не активирован ли чек
-    async with SessionLocal() as session:
-        check = await session.execute(
-            text("SELECT id FROM receipts WHERE transaction_id = :tid"),
-            {"tid": receipt_id}
-        )
-        if check.first():
-            await update.message.reply_text("⚠️ Этот чек уже активирован.")
-            return
+    context.user_data["wait_sum"] = True
+    context.user_data["receipt_id"] = receipt_id
+    context.user_data["poster_sum"] = total
 
-    # сохраняем ожидание суммы
-    context.user_data["pending_receipt_id"] = receipt_id
-    context.user_data["pending_total"] = total
-
-    await update.message.reply_text(
-    "✅ Чек найден.\n"
-    "Введите сумму чека (числом)."
-)
+    await update.message.reply_text("Введите сумму чека.")
 
 
 async def on_startup(app):
@@ -289,9 +233,11 @@ async def on_startup(app):
 
 
 def main():
+
     app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("balance", balance))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("Bot started...")
