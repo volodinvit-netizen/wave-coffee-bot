@@ -55,9 +55,9 @@ LEVEL3_PCT = 0.03
 # =========================
 TEXTS = {
     "ru": {
-        "choose_language": "Выберите язык / Тілді таңдаңыз:",
-        "language_saved_ru": "Язык сохранён: Русский 🇷🇺",
-        "language_saved_kk": "Тіл сақталды: Қазақша 🇰🇿",
+        "choose_language": "Выберите язык:",
+        "language_saved_ru": "Язык сохранён: Русский",
+        "language_saved_kk": "Тіл сақталды: Қазақша",
         "main_menu": "☕ Wave Coffee Rewards\n\nНажмите кнопку ниже.",
         "choose_action": "Выберите действие:",
         "reset_done": "Ок. Сбросил. Выберите действие:",
@@ -124,13 +124,14 @@ TEXTS = {
         "menu_earn": "🧾 Начислить по чеку",
         "menu_spend": "💸 Оплатить баллами (100%)",
         "menu_invite": "🤝 Пригласить друга",
+        "menu_language": "🌐 Сменить язык",
         "menu_confirm": "✅ Подтвердить код",
         "menu_cancel": "❌ Отмена",
     },
     "kk": {
-        "choose_language": "Тілді таңдаңыз / Выберите язык:",
-        "language_saved_ru": "Язык сохранён: Русский 🇷🇺",
-        "language_saved_kk": "Тіл сақталды: Қазақша 🇰🇿",
+        "choose_language": "Тілді таңдаңыз:",
+        "language_saved_ru": "Язык сохранён: Русский",
+        "language_saved_kk": "Тіл сақталды: Қазақша",
         "main_menu": "☕ Wave Coffee Rewards\n\nТөмендегі батырманы басыңыз.",
         "choose_action": "Әрекетті таңдаңыз:",
         "reset_done": "Жарайды. Тазаланды. Әрекетті таңдаңыз:",
@@ -197,6 +198,7 @@ TEXTS = {
         "menu_earn": "🧾 Чек бойынша есептеу",
         "menu_spend": "💸 Баллмен төлеу (100%)",
         "menu_invite": "🤝 Дос шақыру",
+        "menu_language": "🌐 Тілді өзгерту",
         "menu_confirm": "✅ Кодты растау",
         "menu_cancel": "❌ Болдырмау",
     },
@@ -215,10 +217,6 @@ def tr(lang: str, key: str, **kwargs) -> str:
 # =========================
 # БАЗА
 # =========================
-engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
-
-
 async def get_user_lang(tg_id: int) -> str:
     async with SessionLocal() as session:
         r = await session.execute(
@@ -445,6 +443,7 @@ def main_menu_keyboard(is_admin: bool, lang: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(tr(lang, "menu_earn"), callback_data="menu:earn")],
         [InlineKeyboardButton(tr(lang, "menu_spend"), callback_data="menu:spend")],
         [InlineKeyboardButton(tr(lang, "menu_invite"), callback_data="menu:invite")],
+        [InlineKeyboardButton(tr(lang, "menu_language"), callback_data="menu:language")],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton(tr(lang, "menu_confirm"), callback_data="menu:confirm")])
@@ -455,8 +454,8 @@ def main_menu_keyboard(is_admin: bool, lang: str) -> InlineKeyboardMarkup:
 def language_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Русский 🇷🇺", callback_data="lang:ru"),
-            InlineKeyboardButton("Қазақша 🇰🇿", callback_data="lang:kk"),
+            InlineKeyboardButton("Русский", callback_data="lang:ru"),
+            InlineKeyboardButton("Қазақша", callback_data="lang:kk"),
         ]
     ])
 
@@ -532,7 +531,10 @@ async def on_lang_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     saved_msg = "language_saved_ru" if lang == "ru" else "language_saved_kk"
     await query.message.reply_text(tr(lang, saved_msg))
-    await query.message.reply_text(tr(lang, "main_menu"), reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang))
+    await query.message.reply_text(
+        tr(lang, "main_menu"),
+        reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+    )
 
 
 async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -570,6 +572,13 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             tr(lang, "invite_text", link=link, friend_bonus=FRIEND_BONUS),
             reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+        )
+        return
+
+    if action == "menu:language":
+        await query.message.reply_text(
+            tr(lang, "choose_language"),
+            reply_markup=language_keyboard()
         )
         return
 
