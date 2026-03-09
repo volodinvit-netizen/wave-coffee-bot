@@ -51,6 +51,13 @@ LEVEL3_PCT = 0.03
 
 
 # =========================
+# ПОДКЛЮЧЕНИЕ К БАЗЕ
+# =========================
+engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+
+# =========================
 # ЛОКАЛИЗАЦИЯ
 # =========================
 TEXTS = {
