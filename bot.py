@@ -335,7 +335,18 @@ def extract_total_tenge(transaction: dict) -> int:
 
 
 def extract_poster_time(transaction: dict) -> datetime | None:
-    keys = ["date_close", "date", "created_at", "closed_at", "time", "open_date", "close_date"]
+    keys = [
+        "date_close",
+        "date_close_date",
+        "date_start",
+        "date_start_new",
+        "date",
+        "created_at",
+        "closed_at",
+        "time",
+        "open_date",
+        "close_date",
+    ]
 
     print("POSTER TIME RAW TRANSACTION:", transaction)
 
@@ -343,22 +354,31 @@ def extract_poster_time(transaction: dict) -> datetime | None:
         v = transaction.get(k)
         print(f"POSTER TIME CANDIDATE {k} =", repr(v))
 
-        if not v:
+        if v is None or v == "":
             continue
 
-        # unix timestamp in seconds
-        if isinstance(v, (int, float)) and 1000000000 <= float(v) < 1000000000000:
+        # если это строка из цифр — превратим в число
+        if isinstance(v, str) and v.strip().isdigit():
             try:
-                dt = datetime.fromtimestamp(float(v), tz=timezone.utc)
+                v_num = float(v.strip())
+            except Exception:
+                v_num = None
+        else:
+            v_num = v if isinstance(v, (int, float)) else None
+
+        # unix timestamp в секундах
+        if v_num is not None and 1000000000 <= float(v_num) < 1000000000000:
+            try:
+                dt = datetime.fromtimestamp(float(v_num), tz=timezone.utc)
                 print(f"PARSED {k} AS UNIX SECONDS ->", dt.isoformat())
                 return dt
             except Exception as e:
                 print(f"FAILED PARSE {k} AS UNIX SECONDS:", e)
 
-        # unix timestamp in milliseconds
-        if isinstance(v, (int, float)) and float(v) >= 1000000000000:
+        # unix timestamp в миллисекундах
+        if v_num is not None and float(v_num) >= 1000000000000:
             try:
-                dt = datetime.fromtimestamp(float(v) / 1000, tz=timezone.utc)
+                dt = datetime.fromtimestamp(float(v_num) / 1000, tz=timezone.utc)
                 print(f"PARSED {k} AS UNIX MILLISECONDS ->", dt.isoformat())
                 return dt
             except Exception as e:
@@ -387,7 +407,7 @@ def extract_poster_time(transaction: dict) -> datetime | None:
             except Exception:
                 pass
 
-            # common formats without timezone -> assume local time of Актау
+            # форматы без timezone — считаем временем Актау
             fmts = [
                 "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M",
@@ -597,7 +617,10 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "menu:cancel":
         context.user_data.clear()
-        await query.message.reply_text(tr(lang, "reset_done"), reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang))
+        await query.message.reply_text(
+            tr(lang, "reset_done"),
+            reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+        )
         return
 
     if action == "menu:balance":
@@ -674,6 +697,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_msg = (update.message.text or "").strip()
     mode = context.user_data.get("mode")
 
+    # --- 1) Начисление: ждём номер чека
     if mode == "earn_wait_receipt":
         receipt = parse_receipt(text_msg)
         if not receipt:
@@ -692,7 +716,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         poster_time = extract_poster_time(transaction)
 
         async with SessionLocal() as session:
-            check = await session.execute(text("SELECT id FROM receipts WHERE transaction_id=:tid"), {"tid": receipt})
+            check = await session.execute(
+                text("SELECT id FROM receipts WHERE transaction_id=:tid"),
+                {"tid": receipt}
+            )
             if check.first():
                 await update.message.reply_text(tr(lang, "receipt_already_used"))
                 return
@@ -723,6 +750,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(tr(lang, "receipt_found_enter_amount"))
         return
 
+    # --- 2) Начисление: ждём сумму
     if mode == "earn_wait_amount":
         amount = parse_amount_tenge(text_msg)
         if amount is None:
@@ -765,7 +793,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cashback = int(expected * 0.05)
 
         async with SessionLocal() as session:
-            check = await session.execute(text("SELECT id FROM receipts WHERE transaction_id=:tid"), {"tid": receipt_id})
+            check = await session.execute(
+                text("SELECT id FROM receipts WHERE transaction_id=:tid"),
+                {"tid": receipt_id}
+            )
             if check.first():
                 context.user_data.clear()
                 await update.message.reply_text(tr(lang, "receipt_already_used"))
@@ -782,7 +813,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(tr(lang, "daily_limit"))
                     return
 
-            prev = await session.execute(text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"), {"tg": tg_id})
+            prev = await session.execute(
+                text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"),
+                {"tg": tg_id}
+            )
             first_success = ((prev.scalar() or 0) == 0)
 
             r = await session.execute(
@@ -797,17 +831,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ref3 = None
 
             if ref1:
-                r2 = await session.execute(text("SELECT referrer FROM users WHERE telegram_id=:tg"), {"tg": ref1})
+                r2 = await session.execute(
+                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
+                    {"tg": ref1}
+                )
                 ref2 = r2.scalar()
 
             if ref2:
-                r3 = await session.execute(text("SELECT referrer FROM users WHERE telegram_id=:tg"), {"tg": ref2})
+                r3 = await session.execute(
+                    text("SELECT referrer FROM users WHERE telegram_id=:tg"),
+                    {"tg": ref2}
+                )
                 ref3 = r3.scalar()
 
             await session.execute(text("""
                 INSERT INTO receipts (transaction_id, telegram_id, amount, poster_time)
                 VALUES (:tid, :tg, :amount, :poster_time)
-            """), {"tid": receipt_id, "tg": tg_id, "amount": expected, "poster_time": poster_time})
+            """), {
+                "tid": receipt_id,
+                "tg": tg_id,
+                "amount": expected,
+                "poster_time": poster_time
+            })
 
             await session.execute(
                 text("UPDATE users SET balance = balance + :b WHERE telegram_id=:tg"),
@@ -842,7 +887,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await session.commit()
 
-            rbal = await session.execute(text("SELECT balance FROM users WHERE telegram_id=:tg"), {"tg": tg_id})
+            rbal = await session.execute(
+                text("SELECT balance FROM users WHERE telegram_id=:tg"),
+                {"tg": tg_id}
+            )
             new_balance = rbal.scalar() or 0
 
         context.user_data.clear()
@@ -852,6 +900,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(update, context, tr(lang, "choose_action"))
         return
 
+    # --- 3) Списание: ждём сумму
     if mode == "spend_wait_amount":
         amount = parse_amount_tenge(text_msg)
         if amount is None or amount <= 0:
@@ -859,12 +908,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         async with SessionLocal() as session:
-            r = await session.execute(text("SELECT balance FROM users WHERE telegram_id=:tg"), {"tg": tg_id})
+            r = await session.execute(
+                text("SELECT balance FROM users WHERE telegram_id=:tg"),
+                {"tg": tg_id}
+            )
             bal = r.scalar() or 0
 
             if bal < amount:
                 context.user_data.clear()
-                await update.message.reply_text(tr(lang, "not_enough_points", amount=amount, balance=bal))
+                await update.message.reply_text(
+                    tr(lang, "not_enough_points", amount=amount, balance=bal)
+                )
                 await show_menu(update, context, tr(lang, "choose_action"))
                 return
 
@@ -891,6 +945,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(update, context, tr(lang, "choose_action"))
         return
 
+    # --- 4) Подтверждение: ждём код
     if mode == "confirm_wait_code":
         if tg_id != ADMIN_TG_ID:
             context.user_data.clear()
@@ -924,12 +979,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             now = datetime.now(timezone.utc)
             if created_at is not None and (now - created_at) > timedelta(minutes=REDEEM_TTL_MINUTES):
-                await session.execute(text("UPDATE redemptions SET status='expired' WHERE id=:id"), {"id": rid})
+                await session.execute(
+                    text("UPDATE redemptions SET status='expired' WHERE id=:id"),
+                    {"id": rid}
+                )
                 await session.commit()
                 await update.message.reply_text(tr(lang, "confirm_code_expired"))
                 return
 
-            r2 = await session.execute(text("SELECT balance FROM users WHERE telegram_id=:tg"), {"tg": user_id})
+            r2 = await session.execute(
+                text("SELECT balance FROM users WHERE telegram_id=:tg"),
+                {"tg": user_id}
+            )
             bal = r2.scalar() or 0
 
             if bal < amount:
