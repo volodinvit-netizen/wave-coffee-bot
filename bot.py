@@ -49,6 +49,8 @@ LEVEL1_PCT = 0.01
 LEVEL2_PCT = 0.02
 LEVEL3_PCT = 0.03
 
+LOCAL_TZ = timezone(timedelta(hours=5))  # Актау / Казахстан
+
 
 # =========================
 # ПОДКЛЮЧЕНИЕ К БАЗЕ
@@ -339,6 +341,7 @@ def extract_poster_time(transaction: dict) -> datetime | None:
         if not v:
             continue
 
+        # unix timestamp
         if isinstance(v, (int, float)) and v > 1000000000:
             try:
                 return datetime.fromtimestamp(float(v), tz=timezone.utc)
@@ -348,21 +351,24 @@ def extract_poster_time(transaction: dict) -> datetime | None:
         if isinstance(v, str):
             s = v.strip()
 
+            # ISO с Z
             if s.endswith("Z"):
                 try:
                     return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
                 except Exception:
                     pass
 
+            # ISO с явным timezone
             if "T" in s and ("+" in s[10:] or "-" in s[10:]):
                 try:
                     dt = datetime.fromisoformat(s)
                     if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                        dt = dt.replace(tzinfo=LOCAL_TZ)
                     return dt.astimezone(timezone.utc)
                 except Exception:
                     pass
 
+            # Без timezone — считаем локальным временем Актау
             fmts = [
                 "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M",
@@ -374,7 +380,8 @@ def extract_poster_time(transaction: dict) -> datetime | None:
             for fmt in fmts:
                 try:
                     dt = datetime.strptime(s, fmt)
-                    return dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=LOCAL_TZ)
+                    return dt.astimezone(timezone.utc)
                 except Exception:
                     continue
 
