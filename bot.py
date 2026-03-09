@@ -335,40 +335,59 @@ def extract_total_tenge(transaction: dict) -> int:
 
 
 def extract_poster_time(transaction: dict) -> datetime | None:
-    keys = ["date_close", "date", "created_at", "closed_at", "time"]
+    keys = ["date_close", "date", "created_at", "closed_at", "time", "open_date", "close_date"]
+
+    print("POSTER TIME RAW TRANSACTION:", transaction)
+
     for k in keys:
         v = transaction.get(k)
+        print(f"POSTER TIME CANDIDATE {k} =", repr(v))
+
         if not v:
             continue
 
-        # unix timestamp
-        if isinstance(v, (int, float)) and v > 1000000000:
+        # unix timestamp in seconds
+        if isinstance(v, (int, float)) and 1000000000 <= float(v) < 1000000000000:
             try:
-                return datetime.fromtimestamp(float(v), tz=timezone.utc)
-            except Exception:
-                pass
+                dt = datetime.fromtimestamp(float(v), tz=timezone.utc)
+                print(f"PARSED {k} AS UNIX SECONDS ->", dt.isoformat())
+                return dt
+            except Exception as e:
+                print(f"FAILED PARSE {k} AS UNIX SECONDS:", e)
+
+        # unix timestamp in milliseconds
+        if isinstance(v, (int, float)) and float(v) >= 1000000000000:
+            try:
+                dt = datetime.fromtimestamp(float(v) / 1000, tz=timezone.utc)
+                print(f"PARSED {k} AS UNIX MILLISECONDS ->", dt.isoformat())
+                return dt
+            except Exception as e:
+                print(f"FAILED PARSE {k} AS UNIX MILLISECONDS:", e)
 
         if isinstance(v, str):
             s = v.strip()
 
-            # ISO с Z
+            # ISO with Z
             if s.endswith("Z"):
                 try:
-                    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
-                except Exception:
-                    pass
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+                    print(f"PARSED {k} AS ISO Z ->", dt.isoformat())
+                    return dt
+                except Exception as e:
+                    print(f"FAILED PARSE {k} AS ISO Z:", e)
 
-            # ISO с явным timezone
-            if "T" in s and ("+" in s[10:] or "-" in s[10:]):
-                try:
-                    dt = datetime.fromisoformat(s)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=LOCAL_TZ)
-                    return dt.astimezone(timezone.utc)
-                except Exception:
-                    pass
+            # ISO with timezone or plain ISO
+            try:
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=LOCAL_TZ)
+                dt = dt.astimezone(timezone.utc)
+                print(f"PARSED {k} AS ISO ->", dt.isoformat())
+                return dt
+            except Exception:
+                pass
 
-            # Без timezone — считаем локальным временем Актау
+            # common formats without timezone -> assume local time of Актау
             fmts = [
                 "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M",
@@ -376,23 +395,37 @@ def extract_poster_time(transaction: dict) -> datetime | None:
                 "%Y-%m-%dT%H:%M:%S.%f",
                 "%d.%m.%Y %H:%M:%S",
                 "%d.%m.%Y %H:%M",
+                "%Y-%m-%d %H:%M:%S %z",
+                "%Y-%m-%d %H:%M %z",
             ]
             for fmt in fmts:
                 try:
                     dt = datetime.strptime(s, fmt)
-                    dt = dt.replace(tzinfo=LOCAL_TZ)
-                    return dt.astimezone(timezone.utc)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=LOCAL_TZ)
+                    dt = dt.astimezone(timezone.utc)
+                    print(f"PARSED {k} WITH FORMAT {fmt} ->", dt.isoformat())
+                    return dt
                 except Exception:
                     continue
 
+    print("POSTER TIME PARSE FAILED: no usable datetime found")
     return None
 
 
 def is_receipt_too_old(poster_time: datetime | None) -> bool:
     if poster_time is None:
+        print("TIME CHECK: poster_time is None -> treat as OLD")
         return True
+
     now_utc = datetime.now(timezone.utc)
-    return (now_utc - poster_time) > timedelta(minutes=RECEIPT_TTL_MINUTES)
+    diff = now_utc - poster_time
+
+    print("TIME CHECK NOW UTC:", now_utc.isoformat())
+    print("TIME CHECK POSTER UTC:", poster_time.isoformat())
+    print("TIME CHECK DIFF MINUTES:", diff.total_seconds() / 60)
+
+    return diff > timedelta(minutes=RECEIPT_TTL_MINUTES)
 
 
 # =========================
