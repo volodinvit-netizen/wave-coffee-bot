@@ -178,6 +178,12 @@ TEXTS = {
             "Списано: {spent_amount} баллов\n"
             "Пригласил: {referrer}"
         ),
+        "recent_receipts_staff_only": "Список чеков доступен только сотруднику.",
+        "recent_receipts_empty": "Пока нет активированных чеков.",
+        "recent_receipts_title": "🕘 Последние чеки\n\n{items}",
+        "recent_redemptions_staff_only": "Список списаний доступен только сотруднику.",
+        "recent_redemptions_empty": "Пока нет списаний.",
+        "recent_redemptions_title": "💸 Последние списания\n\n{items}",
         "unknown_action": "Не понял действие. Нажмите /start.",
         "unknown_text": "Я не понял. Нажмите кнопку ниже:",
         "menu_balance": "💳 Баланс",
@@ -188,6 +194,8 @@ TEXTS = {
         "menu_stats": "📊 Статистика",
         "menu_confirm": "✅ Подтвердить код",
         "menu_client": "👤 Клиент",
+        "menu_recent_receipts": "🕘 Последние чеки",
+        "menu_recent_redemptions": "💸 Последние списания",
         "menu_cancel": "❌ Отмена",
     },
     "kk": {
@@ -283,6 +291,12 @@ TEXTS = {
             "Шегерілгені: {spent_amount} балл\n"
             "Шақырған адам: {referrer}"
         ),
+        "recent_receipts_staff_only": "Чектер тізімі тек қызметкерге қолжетімді.",
+        "recent_receipts_empty": "Әзірге белсендірілген чек жоқ.",
+        "recent_receipts_title": "🕘 Соңғы чектер\n\n{items}",
+        "recent_redemptions_staff_only": "Списания тізімі тек қызметкерге қолжетімді.",
+        "recent_redemptions_empty": "Әзірге списания жоқ.",
+        "recent_redemptions_title": "💸 Соңғы списаниялар\n\n{items}",
         "unknown_action": "Әрекет түсініксіз. /start басыңыз.",
         "unknown_text": "Түсінбедім. Төмендегі батырманы басыңыз:",
         "menu_balance": "💳 Баланс",
@@ -293,6 +307,8 @@ TEXTS = {
         "menu_stats": "📊 Статистика",
         "menu_confirm": "✅ Кодты растау",
         "menu_client": "👤 Клиент",
+        "menu_recent_receipts": "🕘 Соңғы чектер",
+        "menu_recent_redemptions": "💸 Соңғы списания",
         "menu_cancel": "❌ Болдырмау",
     },
 }
@@ -527,6 +543,53 @@ async def find_client_card(query_text: str) -> dict | None:
         }
 
 
+async def get_recent_receipts(limit: int = 10) -> list[dict]:
+    async with SessionLocal() as session:
+        r = await session.execute(text("""
+            SELECT r.created_at, r.transaction_id, r.amount, r.telegram_id, u.username
+            FROM receipts r
+            LEFT JOIN users u ON u.telegram_id = r.telegram_id
+            ORDER BY r.created_at DESC
+            LIMIT :limit
+        """), {"limit": limit})
+        rows = r.fetchall()
+
+        result = []
+        for created_at, transaction_id, amount, telegram_id, username in rows:
+            result.append({
+                "created_at": created_at,
+                "transaction_id": transaction_id,
+                "amount": int(amount or 0),
+                "telegram_id": telegram_id,
+                "username": f"@{username}" if username else "—",
+            })
+        return result
+
+
+async def get_recent_redemptions(limit: int = 10) -> list[dict]:
+    async with SessionLocal() as session:
+        r = await session.execute(text("""
+            SELECT rd.created_at, rd.code, rd.amount, rd.status, rd.telegram_id, u.username
+            FROM redemptions rd
+            LEFT JOIN users u ON u.telegram_id = rd.telegram_id
+            ORDER BY rd.created_at DESC
+            LIMIT :limit
+        """), {"limit": limit})
+        rows = r.fetchall()
+
+        result = []
+        for created_at, code, amount, status, telegram_id, username in rows:
+            result.append({
+                "created_at": created_at,
+                "code": code,
+                "amount": int(amount or 0),
+                "status": status or "—",
+                "telegram_id": telegram_id,
+                "username": f"@{username}" if username else "—",
+            })
+        return result
+
+
 # =========================
 # POSTER
 # =========================
@@ -732,6 +795,8 @@ def main_menu_keyboard(tg_id: int, lang: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(tr(lang, "menu_confirm"), callback_data="menu:confirm")],
             [InlineKeyboardButton(tr(lang, "menu_stats"), callback_data="menu:stats")],
             [InlineKeyboardButton(tr(lang, "menu_client"), callback_data="menu:client")],
+            [InlineKeyboardButton(tr(lang, "menu_recent_receipts"), callback_data="menu:recent_receipts")],
+            [InlineKeyboardButton(tr(lang, "menu_recent_redemptions"), callback_data="menu:recent_redemptions")],
             [InlineKeyboardButton(tr(lang, "menu_language"), callback_data="menu:language")],
             [InlineKeyboardButton(tr(lang, "menu_cancel"), callback_data="menu:cancel")],
         ]
@@ -896,6 +961,58 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["mode"] = "staff_wait_client_query"
         await query.message.reply_text(
             tr(lang, "client_enter_query"),
+            reply_markup=main_menu_keyboard(tg_id, lang)
+        )
+        return
+
+    if action == "menu:recent_receipts":
+        if not is_staff(tg_id):
+            await query.message.reply_text(tr(lang, "recent_receipts_staff_only"))
+            return
+        items = await get_recent_receipts()
+        if not items:
+            await query.message.reply_text(
+                tr(lang, "recent_receipts_empty"),
+                reply_markup=main_menu_keyboard(tg_id, lang)
+            )
+            return
+
+        lines = []
+        for item in items:
+            created_at = item["created_at"]
+            time_str = created_at.strftime("%d.%m %H:%M") if created_at else "—"
+            lines.append(
+                f"{time_str} | чек {item['transaction_id']} | {item['amount']} ₸ | {item['username']} | {item['telegram_id']}"
+            )
+
+        await query.message.reply_text(
+            tr(lang, "recent_receipts_title", items="\n".join(lines)),
+            reply_markup=main_menu_keyboard(tg_id, lang)
+        )
+        return
+
+    if action == "menu:recent_redemptions":
+        if not is_staff(tg_id):
+            await query.message.reply_text(tr(lang, "recent_redemptions_staff_only"))
+            return
+        items = await get_recent_redemptions()
+        if not items:
+            await query.message.reply_text(
+                tr(lang, "recent_redemptions_empty"),
+                reply_markup=main_menu_keyboard(tg_id, lang)
+            )
+            return
+
+        lines = []
+        for item in items:
+            created_at = item["created_at"]
+            time_str = created_at.strftime("%d.%m %H:%M") if created_at else "—"
+            lines.append(
+                f"{time_str} | код {item['code']} | {item['amount']} ₸ | {item['status']} | {item['username']} | {item['telegram_id']}"
+            )
+
+        await query.message.reply_text(
+            tr(lang, "recent_redemptions_title", items="\n".join(lines)),
             reply_markup=main_menu_keyboard(tg_id, lang)
         )
         return
