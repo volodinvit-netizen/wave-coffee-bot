@@ -165,6 +165,19 @@ TEXTS = {
             "— Начислено баллов: {all_cashback}\n"
             "— Списано баллов: {all_spent}"
         ),
+        "client_staff_only": "Карточка клиента доступна только сотруднику.",
+        "client_enter_query": "Введите @username или telegram_id клиента.",
+        "client_not_found": "Клиент не найден.",
+        "client_card": (
+            "👤 Клиент\n\n"
+            "ID: {telegram_id}\n"
+            "Username: {username}\n"
+            "Баланс: {balance} баллов\n"
+            "Чеков: {receipts_count}\n"
+            "Сумма чеков: {receipts_amount} ₸\n"
+            "Списано: {spent_amount} баллов\n"
+            "Пригласил: {referrer}"
+        ),
         "unknown_action": "Не понял действие. Нажмите /start.",
         "unknown_text": "Я не понял. Нажмите кнопку ниже:",
         "menu_balance": "💳 Баланс",
@@ -174,6 +187,7 @@ TEXTS = {
         "menu_language": "🌐 Сменить язык",
         "menu_stats": "📊 Статистика",
         "menu_confirm": "✅ Подтвердить код",
+        "menu_client": "👤 Клиент",
         "menu_cancel": "❌ Отмена",
     },
     "kk": {
@@ -256,6 +270,19 @@ TEXTS = {
             "— Есептелген балл: {all_cashback}\n"
             "— Шегерілген балл: {all_spent}"
         ),
+        "client_staff_only": "Клиент картасы тек қызметкерге қолжетімді.",
+        "client_enter_query": "@username немесе telegram_id енгізіңіз.",
+        "client_not_found": "Клиент табылмады.",
+        "client_card": (
+            "👤 Клиент\n\n"
+            "ID: {telegram_id}\n"
+            "Username: {username}\n"
+            "Баланс: {balance} балл\n"
+            "Чектер саны: {receipts_count}\n"
+            "Чек сомасы: {receipts_amount} ₸\n"
+            "Шегерілгені: {spent_amount} балл\n"
+            "Шақырған адам: {referrer}"
+        ),
         "unknown_action": "Әрекет түсініксіз. /start басыңыз.",
         "unknown_text": "Түсінбедім. Төмендегі батырманы басыңыз:",
         "menu_balance": "💳 Баланс",
@@ -265,6 +292,7 @@ TEXTS = {
         "menu_language": "🌐 Тілді өзгерту",
         "menu_stats": "📊 Статистика",
         "menu_confirm": "✅ Кодты растау",
+        "menu_client": "👤 Клиент",
         "menu_cancel": "❌ Болдырмау",
     },
 }
@@ -358,6 +386,145 @@ async def set_referrer_if_empty(tg_id: int, referrer_id: int | None):
             WHERE telegram_id = :tg
         """), {"ref": referrer_id, "tg": tg_id})
         await session.commit()
+
+
+async def get_stats() -> dict:
+    async with SessionLocal() as session:
+        today_users = await session.execute(text("""
+            SELECT COUNT(*)
+            FROM users
+            WHERE telegram_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM receipts r
+                  WHERE r.telegram_id = users.telegram_id
+                    AND r.created_at >= date_trunc('day', NOW())
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM receipts r2
+                  WHERE r2.telegram_id = users.telegram_id
+                    AND r2.created_at < date_trunc('day', NOW())
+              )
+        """))
+
+        today_receipts = await session.execute(text("""
+            SELECT COUNT(*) FROM receipts
+            WHERE created_at >= date_trunc('day', NOW())
+        """))
+
+        today_amount = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0) FROM receipts
+            WHERE created_at >= date_trunc('day', NOW())
+        """))
+
+        today_spent = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0) FROM redemptions
+            WHERE status='used' AND used_at >= date_trunc('day', NOW())
+        """))
+
+        today_cashback = await session.execute(text("""
+            SELECT COALESCE(SUM(FLOOR(amount * 0.05)), 0) FROM receipts
+            WHERE created_at >= date_trunc('day', NOW())
+        """))
+
+        all_users = await session.execute(text("SELECT COUNT(*) FROM users"))
+        all_receipts = await session.execute(text("SELECT COUNT(*) FROM receipts"))
+        all_amount = await session.execute(text("SELECT COALESCE(SUM(amount), 0) FROM receipts"))
+        all_spent = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0) FROM redemptions
+            WHERE status='used'
+        """))
+        all_cashback = await session.execute(text("""
+            SELECT COALESCE(SUM(FLOOR(amount * 0.05)), 0) FROM receipts
+        """))
+
+        return {
+            "today_users": int(today_users.scalar() or 0),
+            "today_receipts": int(today_receipts.scalar() or 0),
+            "today_amount": int(today_amount.scalar() or 0),
+            "today_spent": int(today_spent.scalar() or 0),
+            "today_cashback": int(today_cashback.scalar() or 0),
+            "all_users": int(all_users.scalar() or 0),
+            "all_receipts": int(all_receipts.scalar() or 0),
+            "all_amount": int(all_amount.scalar() or 0),
+            "all_spent": int(all_spent.scalar() or 0),
+            "all_cashback": int(all_cashback.scalar() or 0),
+        }
+
+
+async def find_client_card(query_text: str) -> dict | None:
+    query_text = (query_text or "").strip()
+    if not query_text:
+        return None
+
+    username = None
+    telegram_id = None
+
+    if query_text.startswith("@"):
+        username = query_text[1:].strip().lower()
+    elif query_text.isdigit():
+        telegram_id = int(query_text)
+    else:
+        username = query_text.strip().lower()
+
+    async with SessionLocal() as session:
+        if telegram_id is not None:
+            r = await session.execute(text("""
+                SELECT telegram_id, username, balance, referrer
+                FROM users
+                WHERE telegram_id = :tg
+                LIMIT 1
+            """), {"tg": telegram_id})
+        else:
+            r = await session.execute(text("""
+                SELECT telegram_id, username, balance, referrer
+                FROM users
+                WHERE LOWER(COALESCE(username, '')) = :username
+                LIMIT 1
+            """), {"username": username})
+
+        row = r.first()
+        if not row:
+            return None
+
+        tg_id, uname, balance, referrer = row
+
+        receipts_count = await session.execute(text("""
+            SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg
+        """), {"tg": tg_id})
+
+        receipts_amount = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0) FROM receipts WHERE telegram_id=:tg
+        """), {"tg": tg_id})
+
+        spent_amount = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0)
+            FROM redemptions
+            WHERE telegram_id=:tg AND status='used'
+        """), {"tg": tg_id})
+
+        referrer_name = "—"
+        if referrer:
+            rr = await session.execute(text("""
+                SELECT telegram_id, username FROM users WHERE telegram_id=:tg LIMIT 1
+            """), {"tg": referrer})
+            ref_row = rr.first()
+            if ref_row:
+                ref_tg, ref_uname = ref_row
+                referrer_name = f"@{ref_uname}" if ref_uname else str(ref_tg)
+            else:
+                referrer_name = str(referrer)
+
+        return {
+            "telegram_id": tg_id,
+            "username": f"@{uname}" if uname else "—",
+            "balance": int(balance or 0),
+            "receipts_count": int(receipts_count.scalar() or 0),
+            "receipts_amount": int(receipts_amount.scalar() or 0),
+            "spent_amount": int(spent_amount.scalar() or 0),
+            "referrer": referrer_name,
+        }
 
 
 # =========================
@@ -557,98 +724,27 @@ def generate_code() -> str:
 
 
 # =========================
-# СТАТИСТИКА
-# =========================
-async def get_stats() -> dict:
-    async with SessionLocal() as session:
-        today_users = await session.execute(text("""
-            SELECT COUNT(*)
-            FROM users
-            WHERE telegram_id IS NOT NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM receipts r
-                  WHERE r.telegram_id = users.telegram_id
-                    AND r.created_at >= date_trunc('day', NOW())
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM receipts r2
-                  WHERE r2.telegram_id = users.telegram_id
-                    AND r2.created_at < date_trunc('day', NOW())
-              )
-        """))
-
-        today_receipts = await session.execute(text("""
-            SELECT COUNT(*) FROM receipts
-            WHERE created_at >= date_trunc('day', NOW())
-        """))
-
-        today_amount = await session.execute(text("""
-            SELECT COALESCE(SUM(amount), 0) FROM receipts
-            WHERE created_at >= date_trunc('day', NOW())
-        """))
-
-        today_spent = await session.execute(text("""
-            SELECT COALESCE(SUM(amount), 0) FROM redemptions
-            WHERE status='used' AND used_at >= date_trunc('day', NOW())
-        """))
-
-        today_cashback = await session.execute(text("""
-            SELECT COALESCE(SUM(FLOOR(amount * 0.05)), 0) FROM receipts
-            WHERE created_at >= date_trunc('day', NOW())
-        """))
-
-        all_users = await session.execute(text("""
-            SELECT COUNT(*) FROM users
-        """))
-
-        all_receipts = await session.execute(text("""
-            SELECT COUNT(*) FROM receipts
-        """))
-
-        all_amount = await session.execute(text("""
-            SELECT COALESCE(SUM(amount), 0) FROM receipts
-        """))
-
-        all_spent = await session.execute(text("""
-            SELECT COALESCE(SUM(amount), 0) FROM redemptions
-            WHERE status='used'
-        """))
-
-        all_cashback = await session.execute(text("""
-            SELECT COALESCE(SUM(FLOOR(amount * 0.05)), 0) FROM receipts
-        """))
-
-        return {
-            "today_users": int(today_users.scalar() or 0),
-            "today_receipts": int(today_receipts.scalar() or 0),
-            "today_amount": int(today_amount.scalar() or 0),
-            "today_spent": int(today_spent.scalar() or 0),
-            "today_cashback": int(today_cashback.scalar() or 0),
-            "all_users": int(all_users.scalar() or 0),
-            "all_receipts": int(all_receipts.scalar() or 0),
-            "all_amount": int(all_amount.scalar() or 0),
-            "all_spent": int(all_spent.scalar() or 0),
-            "all_cashback": int(all_cashback.scalar() or 0),
-        }
-
-
-# =========================
 # КНОПКИ / МЕНЮ
 # =========================
 def main_menu_keyboard(tg_id: int, lang: str) -> InlineKeyboardMarkup:
+    if is_staff(tg_id):
+        rows = [
+            [InlineKeyboardButton(tr(lang, "menu_confirm"), callback_data="menu:confirm")],
+            [InlineKeyboardButton(tr(lang, "menu_stats"), callback_data="menu:stats")],
+            [InlineKeyboardButton(tr(lang, "menu_client"), callback_data="menu:client")],
+            [InlineKeyboardButton(tr(lang, "menu_language"), callback_data="menu:language")],
+            [InlineKeyboardButton(tr(lang, "menu_cancel"), callback_data="menu:cancel")],
+        ]
+        return InlineKeyboardMarkup(rows)
+
     rows = [
         [InlineKeyboardButton(tr(lang, "menu_balance"), callback_data="menu:balance")],
         [InlineKeyboardButton(tr(lang, "menu_earn"), callback_data="menu:earn")],
         [InlineKeyboardButton(tr(lang, "menu_spend"), callback_data="menu:spend")],
         [InlineKeyboardButton(tr(lang, "menu_invite"), callback_data="menu:invite")],
         [InlineKeyboardButton(tr(lang, "menu_language"), callback_data="menu:language")],
+        [InlineKeyboardButton(tr(lang, "menu_cancel"), callback_data="menu:cancel")],
     ]
-    if is_staff(tg_id):
-        rows.append([InlineKeyboardButton(tr(lang, "menu_confirm"), callback_data="menu:confirm")])
-        rows.append([InlineKeyboardButton(tr(lang, "menu_stats"), callback_data="menu:stats")])
-    rows.append([InlineKeyboardButton(tr(lang, "menu_cancel"), callback_data="menu:cancel")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -792,6 +888,18 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == "menu:client":
+        if not is_staff(tg_id):
+            await query.message.reply_text(tr(lang, "client_staff_only"))
+            return
+        context.user_data.clear()
+        context.user_data["mode"] = "staff_wait_client_query"
+        await query.message.reply_text(
+            tr(lang, "client_enter_query"),
+            reply_markup=main_menu_keyboard(tg_id, lang)
+        )
+        return
+
     if action == "menu:earn":
         context.user_data.clear()
         context.user_data["mode"] = "earn_wait_receipt"
@@ -836,6 +944,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text_msg = (update.message.text or "").strip()
     mode = context.user_data.get("mode")
+
+    # 0. Сотрудник ищет клиента
+    if mode == "staff_wait_client_query":
+        if not is_staff(tg_id):
+            context.user_data.clear()
+            await update.message.reply_text(tr(lang, "client_staff_only"))
+            return
+
+        card = await find_client_card(text_msg)
+        context.user_data.clear()
+
+        if not card:
+            await update.message.reply_text(
+                tr(lang, "client_not_found"),
+                reply_markup=main_menu_keyboard(tg_id, lang)
+            )
+            return
+
+        await update.message.reply_text(
+            tr(lang, "client_card", **card),
+            reply_markup=main_menu_keyboard(tg_id, lang)
+        )
+        return
 
     # 1. Ждём номер чека
     if mode == "earn_wait_receipt":
