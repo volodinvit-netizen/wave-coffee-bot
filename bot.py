@@ -40,7 +40,7 @@ BASE_URL = f"https://{POSTER_DOMAIN}/api"
 
 DAILY_LIMIT = 2
 RECEIPT_TTL_MINUTES = 10
-AMOUNT_TOLERANCE_TENGE = 2
+AMOUNT_TOLERANCE_TENGE = 5
 
 REDEEM_TTL_MINUTES = 10
 
@@ -323,15 +323,24 @@ def get_transaction(transaction_id: str):
 
 def extract_total_tenge(transaction: dict) -> int:
     raw = transaction.get("total") or transaction.get("sum") or transaction.get("total_sum") or 0
+
+    print("POSTER SUM RAW:", raw)
+    print("POSTER SUM TRANSACTION:", transaction)
+
     try:
         raw = float(raw)
-    except Exception:
+    except Exception as e:
+        print("POSTER SUM PARSE ERROR:", e)
         raw = 0.0
 
     if raw >= 100000:
-        return int(round(raw / 100))
+        total = int(round(raw / 100))
+        print("POSTER SUM PARSED AS /100:", total)
+        return total
 
-    return int(round(raw))
+    total = int(round(raw))
+    print("POSTER SUM PARSED DIRECT:", total)
+    return total
 
 
 def extract_poster_time(transaction: dict) -> datetime | None:
@@ -357,7 +366,6 @@ def extract_poster_time(transaction: dict) -> datetime | None:
         if v is None or v == "":
             continue
 
-        # если это строка из цифр — превратим в число
         if isinstance(v, str) and v.strip().isdigit():
             try:
                 v_num = float(v.strip())
@@ -366,7 +374,6 @@ def extract_poster_time(transaction: dict) -> datetime | None:
         else:
             v_num = v if isinstance(v, (int, float)) else None
 
-        # unix timestamp в секундах
         if v_num is not None and 1000000000 <= float(v_num) < 1000000000000:
             try:
                 dt = datetime.fromtimestamp(float(v_num), tz=timezone.utc)
@@ -375,7 +382,6 @@ def extract_poster_time(transaction: dict) -> datetime | None:
             except Exception as e:
                 print(f"FAILED PARSE {k} AS UNIX SECONDS:", e)
 
-        # unix timestamp в миллисекундах
         if v_num is not None and float(v_num) >= 1000000000000:
             try:
                 dt = datetime.fromtimestamp(float(v_num) / 1000, tz=timezone.utc)
@@ -387,7 +393,6 @@ def extract_poster_time(transaction: dict) -> datetime | None:
         if isinstance(v, str):
             s = v.strip()
 
-            # ISO with Z
             if s.endswith("Z"):
                 try:
                     dt = datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
@@ -396,7 +401,6 @@ def extract_poster_time(transaction: dict) -> datetime | None:
                 except Exception as e:
                     print(f"FAILED PARSE {k} AS ISO Z:", e)
 
-            # ISO with timezone or plain ISO
             try:
                 dt = datetime.fromisoformat(s)
                 if dt.tzinfo is None:
@@ -407,7 +411,6 @@ def extract_poster_time(transaction: dict) -> datetime | None:
             except Exception:
                 pass
 
-            # форматы без timezone — считаем временем Актау
             fmts = [
                 "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M",
@@ -697,7 +700,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_msg = (update.message.text or "").strip()
     mode = context.user_data.get("mode")
 
-    # --- 1) Начисление: ждём номер чека
     if mode == "earn_wait_receipt":
         receipt = parse_receipt(text_msg)
         if not receipt:
@@ -750,7 +752,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(tr(lang, "receipt_found_enter_amount"))
         return
 
-    # --- 2) Начисление: ждём сумму
     if mode == "earn_wait_amount":
         amount = parse_amount_tenge(text_msg)
         if amount is None:
@@ -775,6 +776,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data["poster_sum"] = expected
         context.user_data["poster_time"] = poster_time
+
+        print("SUM CHECK USER INPUT:", amount)
+        print("SUM CHECK EXPECTED:", expected)
+        print("SUM CHECK DIFF:", abs(amount - expected))
 
         if abs(amount - expected) > AMOUNT_TOLERANCE_TENGE:
             await update.message.reply_text(tr(lang, "amount_mismatch"))
@@ -900,7 +905,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(update, context, tr(lang, "choose_action"))
         return
 
-    # --- 3) Списание: ждём сумму
     if mode == "spend_wait_amount":
         amount = parse_amount_tenge(text_msg)
         if amount is None or amount <= 0:
@@ -916,9 +920,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if bal < amount:
                 context.user_data.clear()
-                await update.message.reply_text(
-                    tr(lang, "not_enough_points", amount=amount, balance=bal)
-                )
+                await update.message.reply_text(tr(lang, "not_enough_points", amount=amount, balance=bal))
                 await show_menu(update, context, tr(lang, "choose_action"))
                 return
 
@@ -945,7 +947,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(update, context, tr(lang, "choose_action"))
         return
 
-    # --- 4) Подтверждение: ждём код
     if mode == "confirm_wait_code":
         if tg_id != ADMIN_TG_ID:
             context.user_data.clear()
