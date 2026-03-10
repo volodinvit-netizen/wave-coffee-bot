@@ -2,7 +2,7 @@ import os
 import re
 import requests
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -10,8 +10,8 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    filters,
     ContextTypes,
+    filters,
 )
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
@@ -48,8 +48,9 @@ BASE_URL = f"https://{POSTER_DOMAIN}/api"
 DAILY_LIMIT = 2
 RECEIPT_TTL_MINUTES = 10
 AMOUNT_TOLERANCE_TENGE = 5
-
 REDEEM_TTL_MINUTES = 10
+RETENTION_DAYS = 7
+RETENTION_BONUS = 50
 
 FRIEND_BONUS = 200
 LEVEL1_PCT = 0.01
@@ -57,6 +58,13 @@ LEVEL2_PCT = 0.02
 LEVEL3_PCT = 0.03
 
 LOCAL_TZ = timezone(timedelta(hours=5))  # Актау / Казахстан
+
+STATUS_RULES = [
+    ("Explorer", 0),
+    ("Regular", 5),
+    ("Legend", 20),
+    ("Icon", 100),
+]
 
 
 # =========================
@@ -157,7 +165,8 @@ TEXTS = {
             "— Новых клиентов: {today_users}\n"
             "— Сумма чеков: {today_amount} ₸\n"
             "— Начислено баллов: {today_cashback}\n"
-            "— Списано баллов: {today_spent}\n\n"
+            "— Списано баллов: {today_spent}\n"
+            "— Вернувшихся клиентов: {returning_users}\n\n"
             "Всего:\n"
             "— Клиентов: {all_users}\n"
             "— Чеков: {all_receipts}\n"
@@ -173,9 +182,11 @@ TEXTS = {
             "ID: {telegram_id}\n"
             "Username: {username}\n"
             "Баланс: {balance} баллов\n"
+            "Статус: {status}\n"
             "Чеков: {receipts_count}\n"
             "Сумма чеков: {receipts_amount} ₸\n"
             "Списано: {spent_amount} баллов\n"
+            "Последний визит: {last_visit}\n"
             "Пригласил: {referrer}"
         ),
         "recent_receipts_staff_only": "Список чеков доступен только сотруднику.",
@@ -186,6 +197,15 @@ TEXTS = {
         "recent_redemptions_title": "💸 Последние списания\n\n{items}",
         "unknown_action": "Не понял действие. Нажмите /start.",
         "unknown_text": "Я не понял. Нажмите кнопку ниже:",
+        "status_text": "🏆 Ваш статус: {status}\nЧеков: {count}\nДо следующего уровня: {remaining}",
+        "status_upgraded": "🏆 Новый статус: {status}",
+        "retention_message": "☕ Мы давно вас не видели. Дарим +{bonus} бонусов на следующий кофе.",
+        "adjust_admin_only": "Эта функция доступна только администратору.",
+        "adjust_enter_client": "Введите @username или telegram_id клиента для корректировки баланса.",
+        "adjust_enter_delta": "Введите изменение баланса. Например: 200 или -150",
+        "adjust_enter_reason": "Введите причину корректировки.",
+        "adjust_done": "✅ Готово. Клиент: {user}\nИзменение: {delta}\nНовый баланс: {balance}\nПричина: {reason}",
+        "adjust_notice": "ℹ️ Баланс изменён администратором.\nИзменение: {delta}\nНовый баланс: {balance}\nПричина: {reason}",
         "menu_balance": "💳 Баланс",
         "menu_earn": "🧾 Начислить по чеку",
         "menu_spend": "💸 Оплатить баллами (100%)",
@@ -196,6 +216,8 @@ TEXTS = {
         "menu_client": "👤 Клиент",
         "menu_recent_receipts": "🕘 Последние чеки",
         "menu_recent_redemptions": "💸 Последние списания",
+        "menu_status": "🏆 Мой статус",
+        "menu_adjust": "➕➖ Корректировка баланса",
         "menu_cancel": "❌ Отмена",
     },
     "kk": {
@@ -270,7 +292,8 @@ TEXTS = {
             "— Жаңа клиенттер: {today_users}\n"
             "— Чек сомасы: {today_amount} ₸\n"
             "— Есептелген балл: {today_cashback}\n"
-            "— Шегерілген балл: {today_spent}\n\n"
+            "— Шегерілген балл: {today_spent}\n"
+            "— Қайта келген клиенттер: {returning_users}\n\n"
             "Барлығы:\n"
             "— Клиенттер: {all_users}\n"
             "— Чектер: {all_receipts}\n"
@@ -286,9 +309,11 @@ TEXTS = {
             "ID: {telegram_id}\n"
             "Username: {username}\n"
             "Баланс: {balance} балл\n"
+            "Мәртебе: {status}\n"
             "Чектер саны: {receipts_count}\n"
             "Чек сомасы: {receipts_amount} ₸\n"
             "Шегерілгені: {spent_amount} балл\n"
+            "Соңғы келуі: {last_visit}\n"
             "Шақырған адам: {referrer}"
         ),
         "recent_receipts_staff_only": "Чектер тізімі тек қызметкерге қолжетімді.",
@@ -299,6 +324,15 @@ TEXTS = {
         "recent_redemptions_title": "💸 Соңғы списаниялар\n\n{items}",
         "unknown_action": "Әрекет түсініксіз. /start басыңыз.",
         "unknown_text": "Түсінбедім. Төмендегі батырманы басыңыз:",
+        "status_text": "🏆 Сіздің мәртебеңіз: {status}\nЧектер: {count}\nКелесі деңгейге дейін: {remaining}",
+        "status_upgraded": "🏆 Жаңа мәртебе: {status}",
+        "retention_message": "☕ Сізді көптен бері көрмедік. Келесі кофеге +{bonus} бонус береміз.",
+        "adjust_admin_only": "Бұл функция тек әкімшіге қолжетімді.",
+        "adjust_enter_client": "Балансты түзету үшін @username немесе telegram_id енгізіңіз.",
+        "adjust_enter_delta": "Баланс өзгерісін енгізіңіз. Мысалы: 200 немесе -150",
+        "adjust_enter_reason": "Түзету себебін енгізіңіз.",
+        "adjust_done": "✅ Дайын. Клиент: {user}\nӨзгеріс: {delta}\nЖаңа баланс: {balance}\nСебеп: {reason}",
+        "adjust_notice": "ℹ️ Балансты әкімші өзгертті.\nӨзгеріс: {delta}\nЖаңа баланс: {balance}\nСебеп: {reason}",
         "menu_balance": "💳 Баланс",
         "menu_earn": "🧾 Чек бойынша есептеу",
         "menu_spend": "💸 Баллмен төлеу (100%)",
@@ -309,16 +343,46 @@ TEXTS = {
         "menu_client": "👤 Клиент",
         "menu_recent_receipts": "🕘 Соңғы чектер",
         "menu_recent_redemptions": "💸 Соңғы списания",
+        "menu_status": "🏆 Менің мәртебем",
+        "menu_adjust": "➕➖ Балансты түзету",
         "menu_cancel": "❌ Болдырмау",
     },
 }
 
 
-def tr(lang: str, key: str, **kwargs) -> str:
+def tr(lang: str, key: str, **kwargs):
     if lang not in TEXTS:
         lang = "ru"
     value = TEXTS[lang][key]
     return value.format(**kwargs) if kwargs else value
+
+
+# =========================
+# ВСПОМОГАТЕЛЬНОЕ
+# =========================
+def format_dt_local(value: datetime | None) -> str:
+    if not value:
+        return "—"
+    return value.astimezone(LOCAL_TZ).strftime("%d.%m.%Y %H:%M")
+
+
+def get_status_by_receipts(count: int) -> tuple[str, int | None]:
+    current = STATUS_RULES[0][0]
+    next_threshold = None
+    for idx, (name, threshold) in enumerate(STATUS_RULES):
+        if count >= threshold:
+            current = name
+            if idx + 1 < len(STATUS_RULES):
+                next_threshold = STATUS_RULES[idx + 1][1]
+        else:
+            next_threshold = threshold
+            break
+    remaining = None if next_threshold is None else max(0, next_threshold - count)
+    return current, remaining
+
+
+def generate_code() -> str:
+    return str(secrets.randbelow(900000) + 100000)
 
 
 # =========================
@@ -368,6 +432,9 @@ async def create_or_update_tables():
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer BIGINT;"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS friend_bonus_given BOOLEAN DEFAULT FALSE;"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT DEFAULT 'ru';"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_visit TIMESTAMPTZ;"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_retention_sent_at TIMESTAMPTZ;"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Explorer';"))
 
         await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS redemptions (
@@ -381,6 +448,17 @@ async def create_or_update_tables():
         );
         """))
 
+        await conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS balance_adjustments (
+            id BIGSERIAL PRIMARY KEY,
+            target_telegram_id BIGINT NOT NULL,
+            admin_telegram_id BIGINT NOT NULL,
+            delta BIGINT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        """))
+
 
 async def ensure_user_exists(tg_id: int, username: str | None):
     async with SessionLocal() as session:
@@ -388,6 +466,11 @@ async def ensure_user_exists(tg_id: int, username: str | None):
         INSERT INTO users (telegram_id, username)
         VALUES (:tg, :username)
         ON CONFLICT (telegram_id) DO NOTHING
+        """), {"tg": tg_id, "username": username})
+        await session.execute(text("""
+        UPDATE users
+        SET username = COALESCE(:username, username)
+        WHERE telegram_id = :tg
         """), {"tg": tg_id, "username": username})
         await session.commit()
 
@@ -444,6 +527,12 @@ async def get_stats() -> dict:
             WHERE created_at >= date_trunc('day', NOW())
         """))
 
+        returning_users = await session.execute(text("""
+            SELECT COUNT(DISTINCT telegram_id)
+            FROM receipts
+            WHERE created_at >= date_trunc('day', NOW())
+        """))
+
         all_users = await session.execute(text("SELECT COUNT(*) FROM users"))
         all_receipts = await session.execute(text("SELECT COUNT(*) FROM receipts"))
         all_amount = await session.execute(text("SELECT COALESCE(SUM(amount), 0) FROM receipts"))
@@ -461,6 +550,7 @@ async def get_stats() -> dict:
             "today_amount": int(today_amount.scalar() or 0),
             "today_spent": int(today_spent.scalar() or 0),
             "today_cashback": int(today_cashback.scalar() or 0),
+            "returning_users": int(returning_users.scalar() or 0),
             "all_users": int(all_users.scalar() or 0),
             "all_receipts": int(all_receipts.scalar() or 0),
             "all_amount": int(all_amount.scalar() or 0),
@@ -487,14 +577,14 @@ async def find_client_card(query_text: str) -> dict | None:
     async with SessionLocal() as session:
         if telegram_id is not None:
             r = await session.execute(text("""
-                SELECT telegram_id, username, balance, referrer
+                SELECT telegram_id, username, balance, referrer, last_visit, status
                 FROM users
                 WHERE telegram_id = :tg
                 LIMIT 1
             """), {"tg": telegram_id})
         else:
             r = await session.execute(text("""
-                SELECT telegram_id, username, balance, referrer
+                SELECT telegram_id, username, balance, referrer, last_visit, status
                 FROM users
                 WHERE LOWER(COALESCE(username, '')) = :username
                 LIMIT 1
@@ -504,7 +594,7 @@ async def find_client_card(query_text: str) -> dict | None:
         if not row:
             return None
 
-        tg_id, uname, balance, referrer = row
+        tg_id, uname, balance, referrer, last_visit, status = row
 
         receipts_count = await session.execute(text("""
             SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg
@@ -536,9 +626,11 @@ async def find_client_card(query_text: str) -> dict | None:
             "telegram_id": tg_id,
             "username": f"@{uname}" if uname else "—",
             "balance": int(balance or 0),
+            "status": status or "Explorer",
             "receipts_count": int(receipts_count.scalar() or 0),
             "receipts_amount": int(receipts_amount.scalar() or 0),
             "spent_amount": int(spent_amount.scalar() or 0),
+            "last_visit": format_dt_local(last_visit),
             "referrer": referrer_name,
         }
 
@@ -588,6 +680,48 @@ async def get_recent_redemptions(limit: int = 10) -> list[dict]:
                 "username": f"@{username}" if username else "—",
             })
         return result
+
+
+async def run_retention_job(context: ContextTypes.DEFAULT_TYPE):
+    async with SessionLocal() as session:
+        rows = await session.execute(text("""
+            SELECT telegram_id, lang
+            FROM users
+            WHERE last_visit IS NOT NULL
+              AND last_visit < NOW() - (:days || ' days')::interval
+              AND (
+                    last_retention_sent_at IS NULL
+                    OR last_retention_sent_at < NOW() - (:days || ' days')::interval
+                  )
+        """), {"days": RETENTION_DAYS})
+        users = rows.fetchall()
+
+        for telegram_id, lang in users:
+            try:
+                await session.execute(text("""
+                    UPDATE users
+                    SET balance = balance + :bonus,
+                        last_retention_sent_at = NOW()
+                    WHERE telegram_id = :tg
+                """), {"bonus": RETENTION_BONUS, "tg": telegram_id})
+                await context.bot.send_message(
+                    chat_id=telegram_id,
+                    text=tr(lang or "ru", "retention_message", bonus=RETENTION_BONUS)
+                )
+            except Exception as e:
+                print("RETENTION SEND ERROR:", e)
+        await session.commit()
+
+
+async def refresh_user_status(session, tg_id: int) -> tuple[str, int | None, bool]:
+    r = await session.execute(text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"), {"tg": tg_id})
+    count = int(r.scalar() or 0)
+    new_status, remaining = get_status_by_receipts(count)
+    cur = await session.execute(text("SELECT status FROM users WHERE telegram_id=:tg"), {"tg": tg_id})
+    old_status = cur.scalar() or "Explorer"
+    upgraded = old_status != new_status
+    await session.execute(text("UPDATE users SET status=:status WHERE telegram_id=:tg"), {"status": new_status, "tg": tg_id})
+    return new_status, remaining, upgraded
 
 
 # =========================
@@ -782,14 +916,28 @@ def parse_amount_tenge(text_msg: str) -> int | None:
         return None
 
 
-def generate_code() -> str:
-    return str(secrets.randbelow(900000) + 100000)
-
-
 # =========================
 # КНОПКИ / МЕНЮ
 # =========================
 def main_menu_keyboard(tg_id: int, lang: str) -> InlineKeyboardMarkup:
+    if is_admin(tg_id):
+        rows = [
+            [InlineKeyboardButton(tr(lang, "menu_balance"), callback_data="menu:balance")],
+            [InlineKeyboardButton(tr(lang, "menu_earn"), callback_data="menu:earn")],
+            [InlineKeyboardButton(tr(lang, "menu_spend"), callback_data="menu:spend")],
+            [InlineKeyboardButton(tr(lang, "menu_invite"), callback_data="menu:invite")],
+            [InlineKeyboardButton(tr(lang, "menu_status"), callback_data="menu:status")],
+            [InlineKeyboardButton(tr(lang, "menu_confirm"), callback_data="menu:confirm")],
+            [InlineKeyboardButton(tr(lang, "menu_stats"), callback_data="menu:stats")],
+            [InlineKeyboardButton(tr(lang, "menu_client"), callback_data="menu:client")],
+            [InlineKeyboardButton(tr(lang, "menu_recent_receipts"), callback_data="menu:recent_receipts")],
+            [InlineKeyboardButton(tr(lang, "menu_recent_redemptions"), callback_data="menu:recent_redemptions")],
+            [InlineKeyboardButton(tr(lang, "menu_adjust"), callback_data="menu:adjust")],
+            [InlineKeyboardButton(tr(lang, "menu_language"), callback_data="menu:language")],
+            [InlineKeyboardButton(tr(lang, "menu_cancel"), callback_data="menu:cancel")],
+        ]
+        return InlineKeyboardMarkup(rows)
+
     if is_staff(tg_id):
         rows = [
             [InlineKeyboardButton(tr(lang, "menu_confirm"), callback_data="menu:confirm")],
@@ -807,6 +955,7 @@ def main_menu_keyboard(tg_id: int, lang: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(tr(lang, "menu_earn"), callback_data="menu:earn")],
         [InlineKeyboardButton(tr(lang, "menu_spend"), callback_data="menu:spend")],
         [InlineKeyboardButton(tr(lang, "menu_invite"), callback_data="menu:invite")],
+        [InlineKeyboardButton(tr(lang, "menu_status"), callback_data="menu:status")],
         [InlineKeyboardButton(tr(lang, "menu_language"), callback_data="menu:language")],
         [InlineKeyboardButton(tr(lang, "menu_cancel"), callback_data="menu:cancel")],
     ]
@@ -814,7 +963,7 @@ def main_menu_keyboard(tg_id: int, lang: str) -> InlineKeyboardMarkup:
 
 
 def language_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
+    return InlineKeyboardMarkup([[ 
         InlineKeyboardButton("Русский", callback_data="lang:ru"),
         InlineKeyboardButton("Қазақша", callback_data="lang:kk"),
     ]])
@@ -844,7 +993,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ref = None
     if context.args:
         try:
-            ref = int(context.args[0])
+            raw = str(context.args[0]).replace("ref_", "")
+            ref = int(raw)
         except Exception:
             ref = None
 
@@ -942,6 +1092,20 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == "menu:status":
+        async with SessionLocal() as session:
+            r = await session.execute(text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"), {"tg": tg_id})
+            count = int(r.scalar() or 0)
+        status, remaining = get_status_by_receipts(count)
+        rem_text = "максимум" if lang == "ru" and remaining is None else "макс" if remaining is None else str(remaining)
+        if lang == "kk" and remaining is None:
+            rem_text = "макс"
+        await query.message.reply_text(
+            tr(lang, "status_text", status=status, count=count, remaining=rem_text),
+            reply_markup=main_menu_keyboard(tg_id, lang)
+        )
+        return
+
     if action == "menu:stats":
         if not is_staff(tg_id):
             await query.message.reply_text(tr(lang, "stats_staff_only"))
@@ -980,7 +1144,7 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = []
         for item in items:
             created_at = item["created_at"]
-            time_str = created_at.strftime("%d.%m %H:%M") if created_at else "—"
+            time_str = created_at.astimezone(LOCAL_TZ).strftime("%d.%m %H:%M") if created_at else "—"
             lines.append(
                 f"{time_str} | чек {item['transaction_id']} | {item['amount']} ₸ | {item['username']} | {item['telegram_id']}"
             )
@@ -1006,7 +1170,7 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = []
         for item in items:
             created_at = item["created_at"]
-            time_str = created_at.strftime("%d.%m %H:%M") if created_at else "—"
+            time_str = created_at.astimezone(LOCAL_TZ).strftime("%d.%m %H:%M") if created_at else "—"
             lines.append(
                 f"{time_str} | код {item['code']} | {item['amount']} ₸ | {item['status']} | {item['username']} | {item['telegram_id']}"
             )
@@ -1047,6 +1211,18 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == "menu:adjust":
+        if not is_admin(tg_id):
+            await query.message.reply_text(tr(lang, "adjust_admin_only"))
+            return
+        context.user_data.clear()
+        context.user_data["mode"] = "adjust_wait_client"
+        await query.message.reply_text(
+            tr(lang, "adjust_enter_client"),
+            reply_markup=main_menu_keyboard(tg_id, lang)
+        )
+        return
+
     await query.message.reply_text(tr(lang, "unknown_action"))
 
 
@@ -1083,6 +1259,80 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tr(lang, "client_card", **card),
             reply_markup=main_menu_keyboard(tg_id, lang)
         )
+        return
+
+    # 0.1 Админ: поиск клиента для корректировки
+    if mode == "adjust_wait_client":
+        if not is_admin(tg_id):
+            context.user_data.clear()
+            await update.message.reply_text(tr(lang, "adjust_admin_only"))
+            return
+
+        card = await find_client_card(text_msg)
+        if not card:
+            await update.message.reply_text(tr(lang, "client_not_found"))
+            return
+
+        context.user_data["adjust_client_id"] = card["telegram_id"]
+        context.user_data["adjust_client_name"] = card["username"] if card["username"] != "—" else str(card["telegram_id"])
+        context.user_data["mode"] = "adjust_wait_delta"
+        await update.message.reply_text(tr(lang, "adjust_enter_delta"))
+        return
+
+    if mode == "adjust_wait_delta":
+        if not re.fullmatch(r"[+-]?\d+", text_msg or ""):
+            await update.message.reply_text(tr(lang, "adjust_enter_delta"))
+            return
+        delta = int(text_msg)
+        if delta == 0:
+            await update.message.reply_text(tr(lang, "adjust_enter_delta"))
+            return
+        context.user_data["adjust_delta"] = delta
+        context.user_data["mode"] = "adjust_wait_reason"
+        await update.message.reply_text(tr(lang, "adjust_enter_reason"))
+        return
+
+    if mode == "adjust_wait_reason":
+        reason = text_msg or "ручная корректировка"
+        client_id = context.user_data.get("adjust_client_id")
+        delta = int(context.user_data.get("adjust_delta") or 0)
+        client_label = context.user_data.get("adjust_client_name") or str(client_id)
+
+        async with SessionLocal() as session:
+            r = await session.execute(text("SELECT balance, lang FROM users WHERE telegram_id=:tg"), {"tg": client_id})
+            row = r.first()
+            if not row:
+                context.user_data.clear()
+                await update.message.reply_text(tr(lang, "client_not_found"))
+                return
+
+            current_balance, client_lang = row
+            current_balance = int(current_balance or 0)
+            new_balance = current_balance + delta
+            real_delta = delta
+            if new_balance < 0:
+                real_delta = -current_balance
+                new_balance = 0
+
+            await session.execute(text("UPDATE users SET balance=:bal WHERE telegram_id=:tg"), {"bal": new_balance, "tg": client_id})
+            await session.execute(text("""
+                INSERT INTO balance_adjustments (target_telegram_id, admin_telegram_id, delta, reason)
+                VALUES (:target, :admin, :delta, :reason)
+            """), {"target": client_id, "admin": tg_id, "delta": real_delta, "reason": reason})
+            await session.commit()
+
+        context.user_data.clear()
+        await update.message.reply_text(
+            tr(lang, "adjust_done", user=client_label, delta=real_delta, balance=new_balance, reason=reason),
+            reply_markup=main_menu_keyboard(tg_id, lang)
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=client_id,
+                text=tr(client_lang or "ru", "adjust_notice", delta=real_delta, balance=new_balance, reason=reason)
+            )
+        except Exception as e:
+            print("ADJUST NOTICE ERROR:", e)
         return
 
     # 1. Ждём номер чека
@@ -1183,6 +1433,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         cashback = int(expected * 0.05)
+        status_upgraded_to = None
 
         async with SessionLocal() as session:
             check = await session.execute(
@@ -1247,7 +1498,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
 
             await session.execute(
-                text("UPDATE users SET balance = balance + :b WHERE telegram_id=:tg"),
+                text("""
+                    UPDATE users
+                    SET balance = balance + :b,
+                        last_visit = NOW()
+                    WHERE telegram_id=:tg
+                """),
                 {"b": cashback, "tg": tg_id}
             )
 
@@ -1277,6 +1533,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"tg": tg_id}
                 )
 
+            new_status, _, upgraded = await refresh_user_status(session, tg_id)
+            if upgraded:
+                status_upgraded_to = new_status
+
             await session.commit()
 
             rbal = await session.execute(
@@ -1289,6 +1549,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             tr(lang, "done", receipt=receipt_id, amount=expected, cashback=cashback, balance=new_balance)
         )
+        if status_upgraded_to:
+            await update.message.reply_text(tr(lang, "status_upgraded", status=status_upgraded_to))
         await show_menu(update, context, tr(lang, "choose_action"))
         return
 
@@ -1313,7 +1575,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             code = generate_code()
-            for _ in range(2):
+            for _ in range(3):
                 try:
                     await session.execute(text("""
                         INSERT INTO redemptions (code, telegram_id, amount, status)
@@ -1322,6 +1584,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await session.commit()
                     break
                 except Exception:
+                    await session.rollback()
                     code = generate_code()
             else:
                 context.user_data.clear()
@@ -1378,10 +1641,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             r2 = await session.execute(
-                text("SELECT balance FROM users WHERE telegram_id=:tg"),
+                text("SELECT balance, lang FROM users WHERE telegram_id=:tg"),
                 {"tg": user_id}
             )
-            bal = r2.scalar() or 0
+            user_row = r2.first()
+            bal = user_row[0] if user_row else 0
+            client_lang = user_row[1] if user_row else "ru"
 
             if bal < amount:
                 await update.message.reply_text(tr(lang, "confirm_not_enough_points"))
@@ -1399,6 +1664,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data.clear()
         await update.message.reply_text(tr(lang, "confirm_done", amount=amount, code=code))
+        try:
+            async with SessionLocal() as session:
+                rb = await session.execute(text("SELECT balance FROM users WHERE telegram_id=:tg"), {"tg": user_id})
+                new_balance = int(rb.scalar() or 0)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=tr(client_lang or "ru", "balance", balance=new_balance)
+            )
+        except Exception as e:
+            print("CLIENT REDEEM NOTICE ERROR:", e)
         await show_menu(update, context, tr(lang, "choose_action"))
         return
 
@@ -1407,6 +1682,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_startup(app):
     await create_or_update_tables()
+
+    # ежедневный retention в 12:00 по Актау
+    if app.job_queue:
+        app.job_queue.run_daily(
+            run_retention_job,
+            time=time(hour=12, minute=0, tzinfo=LOCAL_TZ),
+            name="retention_job",
+        )
 
 
 def main():
