@@ -27,6 +27,13 @@ POSTER_DOMAIN = os.getenv("POSTER_DOMAIN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_TG_ID = int(os.getenv("ADMIN_TG_ID", "0"))
 
+CASHIER_TG_IDS_RAW = os.getenv("CASHIER_TG_IDS", "")
+CASHIER_TG_IDS = set()
+for part in CASHIER_TG_IDS_RAW.split(","):
+    part = part.strip()
+    if part.isdigit():
+        CASHIER_TG_IDS.add(int(part))
+
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в Environment")
 if not POSTER_TOKEN:
@@ -57,6 +64,21 @@ LOCAL_TZ = timezone(timedelta(hours=5))  # Актау / Казахстан
 # =========================
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+
+# =========================
+# ПРАВА ДОСТУПА
+# =========================
+def is_admin(tg_id: int) -> bool:
+    return tg_id == ADMIN_TG_ID
+
+
+def is_cashier(tg_id: int) -> bool:
+    return tg_id in CASHIER_TG_IDS
+
+
+def is_staff(tg_id: int) -> bool:
+    return is_admin(tg_id) or is_cashier(tg_id)
 
 
 # =========================
@@ -119,7 +141,7 @@ TEXTS = {
             "Покажите код кассиру. Код действует {ttl} минут.\n"
             "Баллы спишутся только после подтверждения кассиром."
         ),
-        "confirm_admin_only": "Эта кнопка доступна только администратору.",
+        "confirm_staff_only": "Эта кнопка доступна только сотруднику.",
         "confirm_enter_code": "Введите код (6 цифр), который показал клиент.",
         "confirm_code_format": "Введите код из 6 цифр.",
         "confirm_code_not_found": "Код не найден.",
@@ -127,6 +149,22 @@ TEXTS = {
         "confirm_code_expired": "Код просрочен.",
         "confirm_not_enough_points": "У клиента недостаточно баллов (баланс изменился).",
         "confirm_done": "✅ Подтверждено. Списано {amount} баллов. Код {code}.",
+        "stats_staff_only": "Статистика доступна только сотруднику.",
+        "stats_text": (
+            "📊 Статистика\n\n"
+            "Сегодня:\n"
+            "— Чеков: {today_receipts}\n"
+            "— Новых клиентов: {today_users}\n"
+            "— Сумма чеков: {today_amount} ₸\n"
+            "— Начислено баллов: {today_cashback}\n"
+            "— Списано баллов: {today_spent}\n\n"
+            "Всего:\n"
+            "— Клиентов: {all_users}\n"
+            "— Чеков: {all_receipts}\n"
+            "— Сумма чеков: {all_amount} ₸\n"
+            "— Начислено баллов: {all_cashback}\n"
+            "— Списано баллов: {all_spent}"
+        ),
         "unknown_action": "Не понял действие. Нажмите /start.",
         "unknown_text": "Я не понял. Нажмите кнопку ниже:",
         "menu_balance": "💳 Баланс",
@@ -134,6 +172,7 @@ TEXTS = {
         "menu_spend": "💸 Оплатить баллами (100%)",
         "menu_invite": "🤝 Пригласить друга",
         "menu_language": "🌐 Сменить язык",
+        "menu_stats": "📊 Статистика",
         "menu_confirm": "✅ Подтвердить код",
         "menu_cancel": "❌ Отмена",
     },
@@ -193,7 +232,7 @@ TEXTS = {
             "Кодты кассирге көрсетіңіз. Код {ttl} минут жарамды.\n"
             "Балл тек кассир растағаннан кейін ғана шегеріледі."
         ),
-        "confirm_admin_only": "Бұл батырма тек әкімшіге қолжетімді.",
+        "confirm_staff_only": "Бұл батырма тек қызметкерге қолжетімді.",
         "confirm_enter_code": "Клиент көрсеткен 6 таңбалы кодты енгізіңіз.",
         "confirm_code_format": "6 таңбалы кодты енгізіңіз.",
         "confirm_code_not_found": "Код табылмады.",
@@ -201,6 +240,22 @@ TEXTS = {
         "confirm_code_expired": "Кодтың уақыты өтіп кеткен.",
         "confirm_not_enough_points": "Клиенттің баллы жеткіліксіз (баланс өзгерген).",
         "confirm_done": "✅ Расталды. {amount} балл шегерілді. Код {code}.",
+        "stats_staff_only": "Статистика тек қызметкерге қолжетімді.",
+        "stats_text": (
+            "📊 Статистика\n\n"
+            "Бүгін:\n"
+            "— Чектер: {today_receipts}\n"
+            "— Жаңа клиенттер: {today_users}\n"
+            "— Чек сомасы: {today_amount} ₸\n"
+            "— Есептелген балл: {today_cashback}\n"
+            "— Шегерілген балл: {today_spent}\n\n"
+            "Барлығы:\n"
+            "— Клиенттер: {all_users}\n"
+            "— Чектер: {all_receipts}\n"
+            "— Чек сомасы: {all_amount} ₸\n"
+            "— Есептелген балл: {all_cashback}\n"
+            "— Шегерілген балл: {all_spent}"
+        ),
         "unknown_action": "Әрекет түсініксіз. /start басыңыз.",
         "unknown_text": "Түсінбедім. Төмендегі батырманы басыңыз:",
         "menu_balance": "💳 Баланс",
@@ -208,6 +263,7 @@ TEXTS = {
         "menu_spend": "💸 Баллмен төлеу (100%)",
         "menu_invite": "🤝 Дос шақыру",
         "menu_language": "🌐 Тілді өзгерту",
+        "menu_stats": "📊 Статистика",
         "menu_confirm": "✅ Кодты растау",
         "menu_cancel": "❌ Болдырмау",
     },
@@ -217,10 +273,8 @@ TEXTS = {
 def tr(lang: str, key: str, **kwargs) -> str:
     if lang not in TEXTS:
         lang = "ru"
-    text_value = TEXTS[lang][key]
-    if kwargs:
-        return text_value.format(**kwargs)
-    return text_value
+    value = TEXTS[lang][key]
+    return value.format(**kwargs) if kwargs else value
 
 
 # =========================
@@ -297,7 +351,6 @@ async def ensure_user_exists(tg_id: int, username: str | None):
 async def set_referrer_if_empty(tg_id: int, referrer_id: int | None):
     if not referrer_id or referrer_id == tg_id:
         return
-
     async with SessionLocal() as session:
         await session.execute(text("""
             UPDATE users
@@ -314,7 +367,6 @@ def get_transaction(transaction_id: str):
     url = f"{BASE_URL}/dash.getTransaction"
     params = {"token": POSTER_TOKEN, "transaction_id": transaction_id}
     r = requests.get(url, params=params, timeout=15)
-
     try:
         return r.json()
     except Exception:
@@ -505,9 +557,87 @@ def generate_code() -> str:
 
 
 # =========================
+# СТАТИСТИКА
+# =========================
+async def get_stats() -> dict:
+    async with SessionLocal() as session:
+        today_users = await session.execute(text("""
+            SELECT COUNT(*)
+            FROM users
+            WHERE telegram_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM receipts r
+                  WHERE r.telegram_id = users.telegram_id
+                    AND r.created_at >= date_trunc('day', NOW())
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM receipts r2
+                  WHERE r2.telegram_id = users.telegram_id
+                    AND r2.created_at < date_trunc('day', NOW())
+              )
+        """))
+
+        today_receipts = await session.execute(text("""
+            SELECT COUNT(*) FROM receipts
+            WHERE created_at >= date_trunc('day', NOW())
+        """))
+
+        today_amount = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0) FROM receipts
+            WHERE created_at >= date_trunc('day', NOW())
+        """))
+
+        today_spent = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0) FROM redemptions
+            WHERE status='used' AND used_at >= date_trunc('day', NOW())
+        """))
+
+        today_cashback = await session.execute(text("""
+            SELECT COALESCE(SUM(FLOOR(amount * 0.05)), 0) FROM receipts
+            WHERE created_at >= date_trunc('day', NOW())
+        """))
+
+        all_users = await session.execute(text("""
+            SELECT COUNT(*) FROM users
+        """))
+
+        all_receipts = await session.execute(text("""
+            SELECT COUNT(*) FROM receipts
+        """))
+
+        all_amount = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0) FROM receipts
+        """))
+
+        all_spent = await session.execute(text("""
+            SELECT COALESCE(SUM(amount), 0) FROM redemptions
+            WHERE status='used'
+        """))
+
+        all_cashback = await session.execute(text("""
+            SELECT COALESCE(SUM(FLOOR(amount * 0.05)), 0) FROM receipts
+        """))
+
+        return {
+            "today_users": int(today_users.scalar() or 0),
+            "today_receipts": int(today_receipts.scalar() or 0),
+            "today_amount": int(today_amount.scalar() or 0),
+            "today_spent": int(today_spent.scalar() or 0),
+            "today_cashback": int(today_cashback.scalar() or 0),
+            "all_users": int(all_users.scalar() or 0),
+            "all_receipts": int(all_receipts.scalar() or 0),
+            "all_amount": int(all_amount.scalar() or 0),
+            "all_spent": int(all_spent.scalar() or 0),
+            "all_cashback": int(all_cashback.scalar() or 0),
+        }
+
+
+# =========================
 # КНОПКИ / МЕНЮ
 # =========================
-def main_menu_keyboard(is_admin: bool, lang: str) -> InlineKeyboardMarkup:
+def main_menu_keyboard(tg_id: int, lang: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(tr(lang, "menu_balance"), callback_data="menu:balance")],
         [InlineKeyboardButton(tr(lang, "menu_earn"), callback_data="menu:earn")],
@@ -515,25 +645,24 @@ def main_menu_keyboard(is_admin: bool, lang: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(tr(lang, "menu_invite"), callback_data="menu:invite")],
         [InlineKeyboardButton(tr(lang, "menu_language"), callback_data="menu:language")],
     ]
-    if is_admin:
+    if is_staff(tg_id):
         rows.append([InlineKeyboardButton(tr(lang, "menu_confirm"), callback_data="menu:confirm")])
+        rows.append([InlineKeyboardButton(tr(lang, "menu_stats"), callback_data="menu:stats")])
     rows.append([InlineKeyboardButton(tr(lang, "menu_cancel"), callback_data="menu:cancel")])
     return InlineKeyboardMarkup(rows)
 
 
 def language_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Русский", callback_data="lang:ru"),
-            InlineKeyboardButton("Қазақша", callback_data="lang:kk"),
-        ]
-    ])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Русский", callback_data="lang:ru"),
+        InlineKeyboardButton("Қазақша", callback_data="lang:kk"),
+    ]])
 
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text_msg: str | None = None):
     user = update.effective_user
     lang = await get_user_lang(user.id)
-    kb = main_menu_keyboard(user.id == ADMIN_TG_ID, lang)
+    kb = main_menu_keyboard(user.id, lang)
     if text_msg is None:
         text_msg = tr(lang, "choose_action")
 
@@ -559,7 +688,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ref = None
 
     await set_referrer_if_empty(tg_id, ref)
-
     context.user_data.clear()
 
     async with SessionLocal() as session:
@@ -593,17 +721,15 @@ async def on_lang_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     tg_id = query.from_user.id
-    lang = "ru"
-    if query.data == "lang:kk":
-        lang = "kk"
+    lang = "kk" if query.data == "lang:kk" else "ru"
 
     await set_user_lang(tg_id, lang)
-
     saved_msg = "language_saved_ru" if lang == "ru" else "language_saved_kk"
+
     await query.message.reply_text(tr(lang, saved_msg))
     await query.message.reply_text(
         tr(lang, "main_menu"),
-        reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+        reply_markup=main_menu_keyboard(tg_id, lang)
     )
 
 
@@ -616,13 +742,13 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user_exists(tg_id, username)
     lang = await get_user_lang(tg_id)
 
-    action = (query.data or "")
+    action = query.data or ""
 
     if action == "menu:cancel":
         context.user_data.clear()
         await query.message.reply_text(
             tr(lang, "reset_done"),
-            reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+            reply_markup=main_menu_keyboard(tg_id, lang)
         )
         return
 
@@ -635,7 +761,7 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bal = r.scalar() or 0
         await query.message.reply_text(
             tr(lang, "balance", balance=bal),
-            reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+            reply_markup=main_menu_keyboard(tg_id, lang)
         )
         return
 
@@ -644,7 +770,7 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = f"https://t.me/{bot_username}?start={tg_id}"
         await query.message.reply_text(
             tr(lang, "invite_text", link=link, friend_bonus=FRIEND_BONUS),
-            reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+            reply_markup=main_menu_keyboard(tg_id, lang)
         )
         return
 
@@ -655,12 +781,23 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == "menu:stats":
+        if not is_staff(tg_id):
+            await query.message.reply_text(tr(lang, "stats_staff_only"))
+            return
+        stats = await get_stats()
+        await query.message.reply_text(
+            tr(lang, "stats_text", **stats),
+            reply_markup=main_menu_keyboard(tg_id, lang)
+        )
+        return
+
     if action == "menu:earn":
         context.user_data.clear()
         context.user_data["mode"] = "earn_wait_receipt"
         await query.message.reply_text(
             tr(lang, "enter_receipt"),
-            reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+            reply_markup=main_menu_keyboard(tg_id, lang)
         )
         return
 
@@ -669,19 +806,19 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["mode"] = "spend_wait_amount"
         await query.message.reply_text(
             tr(lang, "spend_enter_amount"),
-            reply_markup=main_menu_keyboard(tg_id == ADMIN_TG_ID, lang)
+            reply_markup=main_menu_keyboard(tg_id, lang)
         )
         return
 
     if action == "menu:confirm":
-        if tg_id != ADMIN_TG_ID:
-            await query.message.reply_text(tr(lang, "confirm_admin_only"))
+        if not is_staff(tg_id):
+            await query.message.reply_text(tr(lang, "confirm_staff_only"))
             return
         context.user_data.clear()
         context.user_data["mode"] = "confirm_wait_code"
         await query.message.reply_text(
             tr(lang, "confirm_enter_code"),
-            reply_markup=main_menu_keyboard(True, lang)
+            reply_markup=main_menu_keyboard(tg_id, lang)
         )
         return
 
@@ -689,7 +826,7 @@ async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# ТЕКСТ (по режиму)
+# ТЕКСТ
 # =========================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
@@ -700,6 +837,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_msg = (update.message.text or "").strip()
     mode = context.user_data.get("mode")
 
+    # 1. Ждём номер чека
     if mode == "earn_wait_receipt":
         receipt = parse_receipt(text_msg)
         if not receipt:
@@ -726,7 +864,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(tr(lang, "receipt_already_used"))
                 return
 
-            if tg_id != ADMIN_TG_ID:
+            if not is_admin(tg_id):
                 today = await session.execute(text("""
                     SELECT COUNT(*) FROM receipts
                     WHERE telegram_id=:tg
@@ -752,6 +890,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(tr(lang, "receipt_found_enter_amount"))
         return
 
+    # 2. Ждём сумму
     if mode == "earn_wait_amount":
         amount = parse_amount_tenge(text_msg)
         if amount is None:
@@ -785,12 +924,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(tr(lang, "amount_mismatch"))
             return
 
-        if tg_id != ADMIN_TG_ID and poster_time is None:
+        if not is_admin(tg_id) and poster_time is None:
             context.user_data.clear()
             await update.message.reply_text(tr(lang, "cannot_check_time"))
             return
 
-        if tg_id != ADMIN_TG_ID and is_receipt_too_old(poster_time):
+        if not is_admin(tg_id) and is_receipt_too_old(poster_time):
             context.user_data.clear()
             await update.message.reply_text(tr(lang, "receipt_too_old"))
             return
@@ -807,7 +946,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(tr(lang, "receipt_already_used"))
                 return
 
-            if tg_id != ADMIN_TG_ID:
+            if not is_admin(tg_id):
                 today = await session.execute(text("""
                     SELECT COUNT(*) FROM receipts
                     WHERE telegram_id=:tg
@@ -905,6 +1044,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(update, context, tr(lang, "choose_action"))
         return
 
+    # 3. Списание
     if mode == "spend_wait_amount":
         amount = parse_amount_tenge(text_msg)
         if amount is None or amount <= 0:
@@ -947,10 +1087,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(update, context, tr(lang, "choose_action"))
         return
 
+    # 4. Подтверждение кода
     if mode == "confirm_wait_code":
-        if tg_id != ADMIN_TG_ID:
+        if not is_staff(tg_id):
             context.user_data.clear()
-            await update.message.reply_text(tr(lang, "confirm_admin_only"))
+            await update.message.reply_text(tr(lang, "confirm_staff_only"))
             return
 
         m = re.search(r"\d{6}", text_msg)
