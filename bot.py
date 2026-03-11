@@ -49,8 +49,14 @@ DAILY_LIMIT = 2
 RECEIPT_TTL_MINUTES = 10
 AMOUNT_TOLERANCE_TENGE = 5
 REDEEM_TTL_MINUTES = 10
-RETENTION_DAYS = 7
-RETENTION_BONUS = 50
+
+# Новые retention-настройки
+SLEEP_DAYS = 7
+FIRST_RETURN_AFTER_DAYS = 2
+TEMP_BONUS_AMOUNT = 100
+TEMP_BONUS_HOURS = 48
+STATUS_REMINDER_THRESHOLD = 3
+STATUS_REMINDER_COOLDOWN_DAYS = 7
 
 FRIEND_BONUS = 200
 LEVEL1_PCT = 0.01
@@ -199,7 +205,9 @@ TEXTS = {
         "unknown_text": "Я не понял. Нажмите кнопку ниже:",
         "status_text": "🏆 Ваш статус: {status}\nЧеков: {count}\nДо следующего уровня: {remaining}",
         "status_upgraded": "🏆 Новый статус: {status}",
-        "retention_message": "☕ Мы давно вас не видели. Дарим +{bonus} бонусов на следующий кофе.",
+        "sleep_bonus_message": "☕ Мы давно вас не видели. Дарим +100 бонусов. Они действуют 48 часов.",
+        "first_return_bonus_message": "☕ Спасибо за первый визит. Возвращайтесь — держите +100 бонусов на 48 часов.",
+        "status_reminder_message": "🏆 До статуса {status} осталось всего {remaining} чек(а/ов).",
         "adjust_admin_only": "Эта функция доступна только администратору.",
         "adjust_enter_client": "Введите @username или telegram_id клиента для корректировки баланса.",
         "adjust_enter_delta": "Введите изменение баланса. Например: 200 или -150",
@@ -326,7 +334,9 @@ TEXTS = {
         "unknown_text": "Түсінбедім. Төмендегі батырманы басыңыз:",
         "status_text": "🏆 Сіздің мәртебеңіз: {status}\nЧектер: {count}\nКелесі деңгейге дейін: {remaining}",
         "status_upgraded": "🏆 Жаңа мәртебе: {status}",
-        "retention_message": "☕ Сізді көптен бері көрмедік. Келесі кофеге +{bonus} бонус береміз.",
+        "sleep_bonus_message": "☕ Сізді көптен бері көрмедік. +100 бонус береміз. Олар 48 сағат жарамды.",
+        "first_return_bonus_message": "☕ Алғашқы келуіңізге рақмет. Қайта келіңіз — 48 сағатқа +100 бонус.",
+        "status_reminder_message": "🏆 {status} мәртебесіне дейін тек {remaining} чек қалды.",
         "adjust_admin_only": "Бұл функция тек әкімшіге қолжетімді.",
         "adjust_enter_client": "Балансты түзету үшін @username немесе telegram_id енгізіңіз.",
         "adjust_enter_delta": "Баланс өзгерісін енгізіңіз. Мысалы: 200 немесе -150",
@@ -381,6 +391,13 @@ def get_status_by_receipts(count: int) -> tuple[str, int | None]:
     return current, remaining
 
 
+def get_next_status_info(count: int) -> tuple[str | None, int | None]:
+    for name, threshold in STATUS_RULES:
+        if count < threshold:
+            return name, threshold - count
+    return None, None
+
+
 def generate_code() -> str:
     return str(secrets.randbelow(900000) + 100000)
 
@@ -433,7 +450,6 @@ async def create_or_update_tables():
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS friend_bonus_given BOOLEAN DEFAULT FALSE;"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT DEFAULT 'ru';"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_visit TIMESTAMPTZ;"))
-        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_retention_sent_at TIMESTAMPTZ;"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Explorer';"))
 
         await conn.execute(text("""
@@ -457,6 +473,26 @@ async def create_or_update_tables():
             reason TEXT NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
+        """))
+
+        await conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS bonus_events (
+            id BIGSERIAL PRIMARY KEY,
+            telegram_id BIGINT NOT NULL,
+            amount BIGINT NOT NULL,
+            event_type TEXT NOT NULL,
+            reason TEXT,
+            expires_at TIMESTAMPTZ,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            consumed_at TIMESTAMPTZ,
+            meta TEXT
+        );
+        """))
+
+        await conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_bonus_events_tg_type_active
+        ON bonus_events(telegram_id, event_type, is_active);
         """))
 
 
@@ -682,37 +718,6 @@ async def get_recent_redemptions(limit: int = 10) -> list[dict]:
         return result
 
 
-async def run_retention_job(context: ContextTypes.DEFAULT_TYPE):
-    async with SessionLocal() as session:
-        rows = await session.execute(text("""
-            SELECT telegram_id, lang
-            FROM users
-            WHERE last_visit IS NOT NULL
-              AND last_visit < NOW() - (:days || ' days')::interval
-              AND (
-                    last_retention_sent_at IS NULL
-                    OR last_retention_sent_at < NOW() - (:days || ' days')::interval
-                  )
-        """), {"days": RETENTION_DAYS})
-        users = rows.fetchall()
-
-        for telegram_id, lang in users:
-            try:
-                await session.execute(text("""
-                    UPDATE users
-                    SET balance = balance + :bonus,
-                        last_retention_sent_at = NOW()
-                    WHERE telegram_id = :tg
-                """), {"bonus": RETENTION_BONUS, "tg": telegram_id})
-                await context.bot.send_message(
-                    chat_id=telegram_id,
-                    text=tr(lang or "ru", "retention_message", bonus=RETENTION_BONUS)
-                )
-            except Exception as e:
-                print("RETENTION SEND ERROR:", e)
-        await session.commit()
-
-
 async def refresh_user_status(session, tg_id: int) -> tuple[str, int | None, bool]:
     r = await session.execute(text("SELECT COUNT(*) FROM receipts WHERE telegram_id=:tg"), {"tg": tg_id})
     count = int(r.scalar() or 0)
@@ -722,6 +727,210 @@ async def refresh_user_status(session, tg_id: int) -> tuple[str, int | None, boo
     upgraded = old_status != new_status
     await session.execute(text("UPDATE users SET status=:status WHERE telegram_id=:tg"), {"status": new_status, "tg": tg_id})
     return new_status, remaining, upgraded
+
+
+async def has_active_event(session, tg_id: int, event_type: str) -> bool:
+    r = await session.execute(text("""
+        SELECT 1
+        FROM bonus_events
+        WHERE telegram_id = :tg
+          AND event_type = :event_type
+          AND is_active = TRUE
+        LIMIT 1
+    """), {"tg": tg_id, "event_type": event_type})
+    return r.first() is not None
+
+
+async def event_exists_with_meta_today(session, event_type: str, meta: str) -> bool:
+    r = await session.execute(text("""
+        SELECT 1
+        FROM bonus_events
+        WHERE event_type = :event_type
+          AND meta = :meta
+        LIMIT 1
+    """), {"event_type": event_type, "meta": meta})
+    return r.first() is not None
+
+
+async def give_temporary_bonus(session, tg_id: int, amount: int, event_type: str, reason: str, meta: str | None = None):
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=TEMP_BONUS_HOURS)
+    await session.execute(text("""
+        INSERT INTO bonus_events (telegram_id, amount, event_type, reason, expires_at, is_active, meta)
+        VALUES (:tg, :amount, :event_type, :reason, :expires_at, TRUE, :meta)
+    """), {
+        "tg": tg_id,
+        "amount": amount,
+        "event_type": event_type,
+        "reason": reason,
+        "expires_at": expires_at,
+        "meta": meta,
+    })
+    await session.execute(text("""
+        UPDATE users
+        SET balance = balance + :amount
+        WHERE telegram_id = :tg
+    """), {"tg": tg_id, "amount": amount})
+
+
+# =========================
+# JOBS
+# =========================
+async def expire_bonus_events_job(context: ContextTypes.DEFAULT_TYPE):
+    async with SessionLocal() as session:
+        r = await session.execute(text("""
+            SELECT id, telegram_id, amount
+            FROM bonus_events
+            WHERE is_active = TRUE
+              AND expires_at IS NOT NULL
+              AND expires_at <= NOW()
+        """))
+        rows = r.fetchall()
+
+        for bonus_id, telegram_id, amount in rows:
+            bal_row = await session.execute(text("SELECT balance FROM users WHERE telegram_id=:tg"), {"tg": telegram_id})
+            current_balance = int(bal_row.scalar() or 0)
+            new_balance = current_balance - int(amount or 0)
+            if new_balance < 0:
+                new_balance = 0
+
+            await session.execute(text("UPDATE users SET balance=:bal WHERE telegram_id=:tg"), {"bal": new_balance, "tg": telegram_id})
+            await session.execute(text("""
+                UPDATE bonus_events
+                SET is_active = FALSE,
+                    consumed_at = NOW()
+                WHERE id = :id
+            """), {"id": bonus_id})
+
+        await session.commit()
+
+
+async def sleep_bonus_job(context: ContextTypes.DEFAULT_TYPE):
+    async with SessionLocal() as session:
+        rows = await session.execute(text("""
+            SELECT telegram_id, lang
+            FROM users
+            WHERE last_visit IS NOT NULL
+              AND last_visit < NOW() - (:days || ' days')::interval
+        """), {"days": SLEEP_DAYS})
+        users = rows.fetchall()
+
+        for telegram_id, lang in users:
+            if await has_active_event(session, telegram_id, "sleep_bonus"):
+                continue
+
+            try:
+                await give_temporary_bonus(
+                    session=session,
+                    tg_id=telegram_id,
+                    amount=TEMP_BONUS_AMOUNT,
+                    event_type="sleep_bonus",
+                    reason="sleep_7_days",
+                )
+                await context.bot.send_message(
+                    chat_id=telegram_id,
+                    text=tr(lang or "ru", "sleep_bonus_message")
+                )
+            except Exception as e:
+                print("SLEEP BONUS SEND ERROR:", e)
+
+        await session.commit()
+
+
+async def first_return_bonus_job(context: ContextTypes.DEFAULT_TYPE):
+    async with SessionLocal() as session:
+        rows = await session.execute(text("""
+            SELECT u.telegram_id, u.lang, MIN(r.created_at) AS first_receipt_at, COUNT(r.id) AS cnt
+            FROM users u
+            JOIN receipts r ON r.telegram_id = u.telegram_id
+            GROUP BY u.telegram_id, u.lang
+            HAVING COUNT(r.id) = 1
+               AND MIN(r.created_at) <= NOW() - (:days || ' days')::interval
+        """), {"days": FIRST_RETURN_AFTER_DAYS})
+        users = rows.fetchall()
+
+        for telegram_id, lang, first_receipt_at, cnt in users:
+            if await has_active_event(session, telegram_id, "first_return_bonus"):
+                continue
+
+            already_given = await session.execute(text("""
+                SELECT 1
+                FROM bonus_events
+                WHERE telegram_id = :tg
+                  AND event_type = 'first_return_bonus'
+                LIMIT 1
+            """), {"tg": telegram_id})
+            if already_given.first():
+                continue
+
+            try:
+                await give_temporary_bonus(
+                    session=session,
+                    tg_id=telegram_id,
+                    amount=TEMP_BONUS_AMOUNT,
+                    event_type="first_return_bonus",
+                    reason="after_first_receipt_2_days",
+                )
+                await context.bot.send_message(
+                    chat_id=telegram_id,
+                    text=tr(lang or "ru", "first_return_bonus_message")
+                )
+            except Exception as e:
+                print("FIRST RETURN BONUS SEND ERROR:", e)
+
+        await session.commit()
+
+
+async def status_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    async with SessionLocal() as session:
+        rows = await session.execute(text("""
+            SELECT u.telegram_id, u.lang, COUNT(r.id) AS cnt
+            FROM users u
+            JOIN receipts r ON r.telegram_id = u.telegram_id
+            GROUP BY u.telegram_id, u.lang
+        """))
+        users = rows.fetchall()
+
+        for telegram_id, lang, cnt in users:
+            count = int(cnt or 0)
+            next_status, remaining = get_next_status_info(count)
+            if not next_status or remaining is None:
+                continue
+            if remaining > STATUS_REMINDER_THRESHOLD:
+                continue
+
+            meta = f"{next_status}:{count}:{datetime.now(LOCAL_TZ).strftime('%Y-%m-%d')}"
+            if await event_exists_with_meta_today(session, "status_reminder", meta):
+                continue
+
+            recent_same = await session.execute(text("""
+                SELECT 1
+                FROM bonus_events
+                WHERE telegram_id = :tg
+                  AND event_type = 'status_reminder'
+                  AND reason = :reason
+                  AND created_at >= NOW() - (:days || ' days')::interval
+                LIMIT 1
+            """), {
+                "tg": telegram_id,
+                "reason": next_status,
+                "days": STATUS_REMINDER_COOLDOWN_DAYS,
+            })
+            if recent_same.first():
+                continue
+
+            try:
+                await session.execute(text("""
+                    INSERT INTO bonus_events (telegram_id, amount, event_type, reason, expires_at, is_active, meta)
+                    VALUES (:tg, 0, 'status_reminder', :reason, NULL, FALSE, :meta)
+                """), {"tg": telegram_id, "reason": next_status, "meta": meta})
+                await context.bot.send_message(
+                    chat_id=telegram_id,
+                    text=tr(lang or "ru", "status_reminder_message", status=next_status, remaining=remaining)
+                )
+            except Exception as e:
+                print("STATUS REMINDER SEND ERROR:", e)
+
+        await session.commit()
 
 
 # =========================
@@ -1683,12 +1892,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_startup(app):
     await create_or_update_tables()
 
-    # ежедневный retention в 12:00 по Актау
     if app.job_queue:
+        # Спящие гости: каждый день в 12:00
         app.job_queue.run_daily(
-            run_retention_job,
+            sleep_bonus_job,
             time=time(hour=12, minute=0, tzinfo=LOCAL_TZ),
-            name="retention_job",
+            name="sleep_bonus_job",
+        )
+
+        # После первого визита: каждый день в 12:10
+        app.job_queue.run_daily(
+            first_return_bonus_job,
+            time=time(hour=12, minute=10, tzinfo=LOCAL_TZ),
+            name="first_return_bonus_job",
+        )
+
+        # Напоминание о статусе: каждый день в 12:20
+        app.job_queue.run_daily(
+            status_reminder_job,
+            time=time(hour=12, minute=20, tzinfo=LOCAL_TZ),
+            name="status_reminder_job",
+        )
+
+        # Сгорание временных бонусов: каждый час
+        app.job_queue.run_repeating(
+            expire_bonus_events_job,
+            interval=3600,
+            first=30,
+            name="expire_bonus_events_job",
         )
 
 
