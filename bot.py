@@ -57,6 +57,7 @@ TEMP_BONUS_AMOUNT = 100
 TEMP_BONUS_HOURS = 48
 STATUS_REMINDER_THRESHOLD = 3
 STATUS_REMINDER_COOLDOWN_DAYS = 7
+SLEEP_BONUS_COOLDOWN_DAYS = 7
 
 FRIEND_BONUS = 200
 LEVEL1_PCT = 0.01
@@ -450,6 +451,7 @@ async def create_or_update_tables():
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS friend_bonus_given BOOLEAN DEFAULT FALSE;"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT DEFAULT 'ru';"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_visit TIMESTAMPTZ;"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_retention_sent_at TIMESTAMPTZ;"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Explorer';"))
 
         await conn.execute(text("""
@@ -811,7 +813,11 @@ async def sleep_bonus_job(context: ContextTypes.DEFAULT_TYPE):
             FROM users
             WHERE last_visit IS NOT NULL
               AND last_visit < NOW() - (:days || ' days')::interval
-        """), {"days": SLEEP_DAYS})
+              AND (
+                    last_retention_sent_at IS NULL
+                    OR last_retention_sent_at < NOW() - (:cooldown || ' days')::interval
+                  )
+        """), {"days": SLEEP_DAYS, "cooldown": SLEEP_BONUS_COOLDOWN_DAYS})
         users = rows.fetchall()
 
         for telegram_id, lang in users:
@@ -826,6 +832,11 @@ async def sleep_bonus_job(context: ContextTypes.DEFAULT_TYPE):
                     event_type="sleep_bonus",
                     reason="sleep_7_days",
                 )
+                await session.execute(text("""
+                    UPDATE users
+                    SET last_retention_sent_at = NOW()
+                    WHERE telegram_id = :tg
+                """), {"tg": telegram_id})
                 await context.bot.send_message(
                     chat_id=telegram_id,
                     text=tr(lang or "ru", "sleep_bonus_message")
