@@ -3,6 +3,7 @@ import re
 import requests
 import secrets
 from datetime import datetime, timedelta, timezone, time
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -77,7 +78,35 @@ STATUS_RULES = [
 # =========================
 # ПОДКЛЮЧЕНИЕ К БАЗЕ
 # =========================
-engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
+def normalize_database_url(raw_url: str) -> str:
+    """Render PostgreSQL часто требует SSL и иногда отдаёт URL без asyncpg-драйвера."""
+    url = (raw_url or "").strip()
+
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+
+    # SSL включаем через connect_args, поэтому убираем ssl/sslmode из query,
+    # чтобы не было конфликтов параметров у asyncpg.
+    parts = urlsplit(url)
+    query_pairs = [
+        (k, v)
+        for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k.lower() not in {"ssl", "sslmode"}
+    ]
+    clean_query = urlencode(query_pairs)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, clean_query, parts.fragment))
+
+
+DATABASE_URL = normalize_database_url(DATABASE_URL)
+
+engine = create_async_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    connect_args={"ssl": True},
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
