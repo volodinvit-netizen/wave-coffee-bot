@@ -2,8 +2,9 @@ import os
 import re
 import requests
 import secrets
-from datetime import datetime, timedelta, timezone, time
+import ssl
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+from datetime import datetime, timedelta, timezone, time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -78,26 +79,37 @@ STATUS_RULES = [
 # =========================
 # ПОДКЛЮЧЕНИЕ К БАЗЕ
 # =========================
-def normalize_database_url(raw_url: str) -> str:
-    """Render PostgreSQL часто требует SSL и иногда отдаёт URL без asyncpg-драйвера."""
-    url = (raw_url or "").strip()
-
+def normalize_database_url(url: str) -> str:
+    """
+    Render/PostgreSQL иногда отдаёт URL как postgresql:// или postgres://.
+    SQLAlchemy async engine должен получать postgresql+asyncpg://.
+    Параметры ssl/sslmode из URL убираем, потому что SSL передаём напрямую
+    через asyncpg connect_args. Так меньше конфликтов.
+    """
     if url.startswith("postgres://"):
-        url = "postgresql://" + url[len("postgres://"):]
-
-    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
         url = "postgresql+asyncpg://" + url[len("postgresql://"):]
 
-    # SSL включаем через connect_args, поэтому убираем ssl/sslmode из query,
-    # чтобы не было конфликтов параметров у asyncpg.
     parts = urlsplit(url)
-    query_pairs = [
+    query = [
         (k, v)
         for k, v in parse_qsl(parts.query, keep_blank_values=True)
-        if k.lower() not in {"ssl", "sslmode"}
+        if k.lower() not in ("ssl", "sslmode")
     ]
-    clean_query = urlencode(query_pairs)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, clean_query, parts.fragment))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def make_ssl_context() -> ssl.SSLContext:
+    """
+    Для managed Postgres на Render/Supabase/Neon часто нужен SSL.
+    Отключаем проверку hostname/cert, потому что у managed DB сертификаты
+    иногда не совпадают с хостом из connection string.
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 DATABASE_URL = normalize_database_url(DATABASE_URL)
@@ -105,7 +117,8 @@ DATABASE_URL = normalize_database_url(DATABASE_URL)
 engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
-    connect_args={"ssl": True},
+    pool_recycle=300,
+    connect_args={"ssl": make_ssl_context()},
 )
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
