@@ -2,8 +2,6 @@ import os
 import re
 import requests
 import secrets
-import ssl
-from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from datetime import datetime, timedelta, timezone, time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -79,46 +77,41 @@ STATUS_RULES = [
 # =========================
 # ПОДКЛЮЧЕНИЕ К БАЗЕ
 # =========================
-def normalize_database_url(url: str) -> str:
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+
+
+def prepare_database_url(raw_url: str) -> str:
     """
-    Render/PostgreSQL иногда отдаёт URL как postgresql:// или postgres://.
-    SQLAlchemy async engine должен получать postgresql+asyncpg://.
-    Параметры ssl/sslmode из URL убираем, потому что SSL передаём напрямую
-    через asyncpg connect_args. Так меньше конфликтов.
+    Render/PostgreSQL часто требует SSL.
+    Для SQLAlchemy + asyncpg самый стабильный вариант:
+    postgresql+asyncpg://...?...&ssl=require
     """
+    url = raw_url.strip()
+
     if url.startswith("postgres://"):
-        url = "postgresql+asyncpg://" + url[len("postgres://"):]
-    elif url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+        url = url.replace("postgres://", "postgresql://", 1)
 
-    parts = urlsplit(url)
-    query = [
-        (k, v)
-        for k, v in parse_qsl(parts.query, keep_blank_values=True)
-        if k.lower() not in ("ssl", "sslmode")
-    ]
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
 
-def make_ssl_context() -> ssl.SSLContext:
-    """
-    Для managed Postgres на Render/Supabase/Neon часто нужен SSL.
-    Отключаем проверку hostname/cert, потому что у managed DB сертификаты
-    иногда не совпадают с хостом из connection string.
-    """
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+    # asyncpg понимает ssl=require, а sslmode может конфликтовать
+    query.pop("sslmode", None)
+    query["ssl"] = "require"
+
+    return urlunparse(parsed._replace(query=urlencode(query)))
 
 
-DATABASE_URL = normalize_database_url(DATABASE_URL)
+DATABASE_URL_PREPARED = prepare_database_url(DATABASE_URL)
 
 engine = create_async_engine(
-    DATABASE_URL,
+    DATABASE_URL_PREPARED,
     pool_pre_ping=True,
+    pool_size=1,
+    max_overflow=2,
     pool_recycle=300,
-    connect_args={"ssl": make_ssl_context()},
 )
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
